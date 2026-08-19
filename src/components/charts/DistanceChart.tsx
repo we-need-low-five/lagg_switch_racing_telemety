@@ -1,0 +1,489 @@
+import uPlot, { type AlignedData, type Options } from "uplot";
+import "uplot/dist/uPlot.min.css";
+import { useEffect, useRef } from "react";
+import {
+  fuelLitersToDisplay,
+  fuelUnitLabel,
+  pressurePsiToDisplay,
+  pressureUnitLabel,
+  speedMpsToDisplay,
+  speedUnitLabel,
+  tempCToDisplay,
+  tempUnitLabel,
+  usePreferences,
+} from "../../lib/preferences";
+import { alignLapSamples } from "../../lib/chartAlign";
+import type { DistanceSample } from "../../types";
+
+export interface SeriesConfig {
+  key: keyof DistanceSample;
+  label: string;
+  color: string;
+}
+
+interface DistanceChartProps {
+  title: string;
+  channelKey: keyof DistanceSample;
+  samplesByLap: Array<{ label: string; color: string; samples: DistanceSample[] }>;
+  onCursorMove?: (pct: number | null) => void;
+  onPlotMount?: (plot: uPlot) => void;
+  onPlotUnmount?: (plot: uPlot) => void;
+  height?: number;
+  segmentZoom?: boolean;
+  compact?: boolean;
+  showNoData?: boolean;
+  valueSelector?: (sample: DistanceSample) => number | null | undefined;
+}
+
+function transformValue(
+  key: keyof DistanceSample,
+  raw: number,
+  prefs: ReturnType<typeof usePreferences>[0],
+): number {
+  switch (key) {
+    case "speed_mps":
+      return speedMpsToDisplay(raw, prefs.speedUnit);
+    case "throttle":
+    case "brake":
+      return raw * 100;
+    case "steering":
+      return steeringToPercent(raw);
+    case "fuel":
+      return fuelLitersToDisplay(raw, prefs.fuelUnit);
+    case "tyre_temp_fl":
+    case "tyre_temp_fr":
+    case "tyre_temp_rl":
+    case "tyre_temp_rr":
+      return tempCToDisplay(raw, prefs.tempUnit);
+    case "tyre_press_fl":
+    case "tyre_press_fr":
+    case "tyre_press_rl":
+    case "tyre_press_rr":
+      return pressurePsiToDisplay(raw, prefs.pressureUnit);
+    case "lap_time_s":
+      return raw;
+    default:
+      return raw;
+  }
+}
+
+function steeringToPercent(val: number): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return 0;
+  return Math.abs(n) <= 1 ? n * 100 : n;
+}
+
+function formatYTick(
+  key: keyof DistanceSample,
+  val: number,
+  deltaUnit: "s" | "ms",
+): string {
+  if (key === "lap_time_s") {
+    if (deltaUnit === "ms") {
+      return String(Math.round(val * 1000));
+    }
+    return val.toFixed(2);
+  }
+  if (key === "steering") {
+    const rounded = Math.round(steeringToPercent(val));
+    if (rounded === 0) return "0";
+    return String(rounded);
+  }
+  if (key === "gear" || key === "rpm") {
+    return String(Math.round(val));
+  }
+  return String(Math.round(val));
+}
+
+function formatSteeringLegendBody(val: number | null): string {
+  if (val == null) return "";
+  const signedPct = steeringToPercent(val);
+  const rounded = Math.round(signedPct);
+  if (rounded === 0) return "0%";
+  const pct = Math.abs(rounded);
+  return rounded < 0 ? `L ${pct}%` : `R ${pct}%`;
+}
+
+function formatLegendValueBody(
+  key: keyof DistanceSample,
+  val: number | null,
+  dataIdx: number | null | undefined,
+  deltaUnit: "s" | "ms",
+): string {
+  if (dataIdx == null) return "--";
+  if (val == null) return "";
+  if (key === "steering") {
+    return formatSteeringLegendBody(val);
+  }
+  if (key === "lap_time_s") {
+    return formatYTick(key, val, deltaUnit);
+  }
+  return String(Math.round(val));
+}
+
+function legendValueSuffix(
+  key: keyof DistanceSample,
+  prefs: ReturnType<typeof usePreferences>[0],
+): string | null {
+  switch (key) {
+    case "speed_mps":
+      return speedUnitLabel(prefs.speedUnit);
+    case "throttle":
+    case "brake":
+      return "%";
+    case "gear":
+      return "Gear";
+    case "rpm":
+      return "RPM";
+    case "lap_time_s":
+      return prefs.deltaUnit === "ms" ? "ms" : "s";
+    case "fuel":
+      return fuelUnitLabel(prefs.fuelUnit);
+    case "tyre_temp_fl":
+    case "tyre_temp_fr":
+    case "tyre_temp_rl":
+    case "tyre_temp_rr":
+      return tempUnitLabel(prefs.tempUnit);
+    case "tyre_press_fl":
+    case "tyre_press_fr":
+    case "tyre_press_rl":
+    case "tyre_press_rr":
+      return pressureUnitLabel(prefs.pressureUnit);
+    case "steering":
+      return null;
+    default:
+      return null;
+  }
+}
+
+function formatLegendValueWithSuffix(
+  key: keyof DistanceSample,
+  val: number | null,
+  dataIdx: number | null | undefined,
+  prefs: ReturnType<typeof usePreferences>[0],
+): string {
+  const body = formatLegendValueBody(key, val, dataIdx, prefs.deltaUnit);
+  if (body === "--") return "--";
+  if (body === "") return "";
+  const suffix = legendValueSuffix(key, prefs);
+  if (!suffix) return body;
+  return `${body} ${suffix}`;
+}
+
+function yAxisLabel(
+  key: keyof DistanceSample,
+  prefs: ReturnType<typeof usePreferences>[0],
+): string {
+  switch (key) {
+    case "speed_mps":
+      return `Speed (${speedUnitLabel(prefs.speedUnit)})`;
+    case "throttle":
+      return "Throttle (%)";
+    case "brake":
+      return "Brake (%)";
+    case "steering":
+      return "Steering (L/R %)";
+    case "gear":
+      return "Gear";
+    case "rpm":
+      return "RPM";
+    case "lap_time_s":
+      return prefs.deltaUnit === "ms" ? "Delta (ms)" : "Delta (s)";
+    case "fuel":
+      return `Fuel used (${fuelUnitLabel(prefs.fuelUnit)})`;
+    case "tyre_temp_fl":
+    case "tyre_temp_fr":
+    case "tyre_temp_rl":
+    case "tyre_temp_rr":
+      return `Temp (${tempUnitLabel(prefs.tempUnit)})`;
+    case "tyre_press_fl":
+    case "tyre_press_fr":
+    case "tyre_press_rl":
+    case "tyre_press_rr":
+      return `Pressure (${pressureUnitLabel(prefs.pressureUnit)})`;
+    default:
+      return "";
+  }
+}
+
+function getChartAxisColor(): string {
+  return (
+    getComputedStyle(document.documentElement)
+      .getPropertyValue("--chart-axis")
+      .trim() || "hsl(220 12% 62%)"
+  );
+}
+
+function getChartGridColor(): string {
+  return (
+    getComputedStyle(document.documentElement)
+      .getPropertyValue("--chart-grid")
+      .trim() || "hsl(250 9% 18%)"
+  );
+}
+
+function yAxisTickBandWidth(values: string[] | null): number {
+  if (!values || values.length === 0) return 48;
+  const maxLen = Math.max(...values.map((v) => v.length), 1);
+  return Math.max(48, maxLen * 8 + 20);
+}
+
+function hideLegendDistanceRow(u: uPlot): void {
+  const row = u.root.querySelector<HTMLElement>(
+    ".u-legend tbody > tr.u-series:first-child",
+  );
+  if (row) row.style.setProperty("display", "none", "important");
+}
+
+export function DistanceChart({
+  title,
+  channelKey,
+  samplesByLap,
+  onCursorMove,
+  onPlotMount,
+  onPlotUnmount,
+  height = 280,
+  segmentZoom = false,
+  compact = false,
+  showNoData = false,
+  valueSelector,
+}: DistanceChartProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<uPlot | null>(null);
+  const onCursorMoveRef = useRef(onCursorMove);
+  const onPlotMountRef = useRef(onPlotMount);
+  const onPlotUnmountRef = useRef(onPlotUnmount);
+  const heightRef = useRef(height);
+  const [prefs] = usePreferences();
+  const prefsRef = useRef(prefs);
+
+  prefsRef.current = prefs;
+  heightRef.current = height;
+  onCursorMoveRef.current = onCursorMove;
+  onPlotMountRef.current = onPlotMount;
+  onPlotUnmountRef.current = onPlotUnmount;
+
+  useEffect(() => {
+    if (!rootRef.current || samplesByLap.length === 0 || showNoData) return;
+
+    const { x, aligned } = alignLapSamples(samplesByLap.map((lap) => lap.samples));
+    if (x.length === 0) {
+      if (plotRef.current) {
+        onPlotUnmountRef.current?.(plotRef.current);
+        plotRef.current.destroy();
+        plotRef.current = null;
+      }
+      return;
+    }
+
+    const data: AlignedData = [x];
+    const series: Options["series"] = [{}];
+
+    for (let i = 0; i < samplesByLap.length; i += 1) {
+      const lap = samplesByLap[i];
+      const alignedSamples = aligned[i];
+      if (alignedSamples.length !== x.length) continue;
+
+      data.push(
+        alignedSamples.map((s) => {
+          const raw = valueSelector ? valueSelector(s) : Number(s[channelKey]);
+          if (raw == null || !Number.isFinite(raw)) return null;
+          return transformValue(channelKey, raw, prefsRef.current);
+        }),
+      );
+      series.push({
+        label: lap.label,
+        stroke: lap.color,
+        width: 2,
+        points: {
+          show: false,
+          size: 8,
+          width: 2,
+          stroke: lap.color,
+          fill: lap.color,
+        },
+        value: (_u, val, _si, dataIdx) =>
+          formatLegendValueWithSuffix(
+            channelKey,
+            val,
+            dataIdx,
+            prefsRef.current,
+          ),
+      });
+    }
+
+    if (data.length < 2) {
+      if (plotRef.current) {
+        onPlotUnmountRef.current?.(plotRef.current);
+        plotRef.current.destroy();
+        plotRef.current = null;
+      }
+      return;
+    }
+
+    const yLabel = yAxisLabel(channelKey, prefsRef.current);
+    const axisColor = getChartAxisColor();
+    const gridColor = getChartGridColor();
+    const hideXAxis = segmentZoom || compact;
+
+    const ySeries = data.slice(1) as number[][];
+    const yFlat = ySeries.flat().filter((v) => Number.isFinite(v));
+    const yMin = yFlat.length ? Math.min(...yFlat) : 0;
+    const yMax = yFlat.length ? Math.max(...yFlat) : 0;
+    const yTickSamples = [yMin, (yMin + yMax) / 2, yMax];
+    const yTickStrings = yTickSamples.map((v) =>
+      formatYTick(
+        channelKey,
+        channelKey === "steering" ? steeringToPercent(v) : v,
+        prefsRef.current.deltaUnit,
+      ),
+    );
+    const yAxisSize = yAxisTickBandWidth(yTickStrings);
+    const plotHeight = heightRef.current;
+
+    const opts: Options = {
+      width: rootRef.current.clientWidth,
+      height: plotHeight,
+      title,
+      padding: [8, 12, 4, 4],
+      series,
+      scales: {
+        x: { time: false },
+        y: { auto: true },
+      },
+      axes: [
+        {
+          stroke: axisColor,
+          grid: { stroke: gridColor },
+          label: hideXAxis ? "" : "Distance",
+          labelSize: hideXAxis ? 0 : 28,
+          labelGap: hideXAxis ? 0 : 6,
+          size: compact ? 36 : 50,
+          ticks: { show: !hideXAxis },
+          values: (_u, vals) =>
+            hideXAxis
+              ? vals.map(() => "")
+              : vals.map((v) => `${Number(v).toFixed(0)}`),
+        },
+        {
+          stroke: axisColor,
+          grid: { stroke: gridColor },
+          label: yLabel,
+          labelSize: 32,
+          labelGap: 8,
+          gap: 10,
+          size: yAxisSize,
+          ...(channelKey === "rpm" && {
+            incrs: [100, 200, 250, 500, 1000, 2000, 2500, 5000],
+          }),
+          values: (_u, vals) =>
+            vals.map((v) =>
+              formatYTick(
+                channelKey,
+                channelKey === "steering" ? steeringToPercent(v) : v,
+                prefsRef.current.deltaUnit,
+              ),
+            ),
+        },
+      ],
+      legend: {
+        live: true,
+      },
+      cursor: {
+        drag: { x: false, y: false },
+        sync: { key: "simtelemetry" },
+        focus: { prox: -1 },
+        points: {
+          width: 2,
+        },
+      },
+      hooks: {
+        ready: [hideLegendDistanceRow],
+        setLegend: [hideLegendDistanceRow],
+        setCursor: [
+          (u) => {
+            if (!u.cursor.event) return;
+            const idx = u.cursor.idx;
+            if (idx == null) return;
+            onCursorMoveRef.current?.(u.data[0][idx] ?? null);
+          },
+        ],
+      },
+    };
+
+    if (plotRef.current) {
+      onPlotUnmountRef.current?.(plotRef.current);
+      plotRef.current.destroy();
+    }
+    plotRef.current = new uPlot(opts, data, rootRef.current);
+    onPlotMountRef.current?.(plotRef.current);
+    hideLegendDistanceRow(plotRef.current);
+
+    const onWindowResize = () => {
+      if (plotRef.current && rootRef.current) {
+        plotRef.current.setSize({
+          width: rootRef.current.clientWidth,
+          height: heightRef.current,
+        });
+      }
+    };
+    window.addEventListener("resize", onWindowResize);
+    return () => {
+      window.removeEventListener("resize", onWindowResize);
+      if (plotRef.current) {
+        onPlotUnmountRef.current?.(plotRef.current);
+        plotRef.current.destroy();
+        plotRef.current = null;
+      }
+    };
+  }, [
+    samplesByLap,
+    channelKey,
+    title,
+    segmentZoom,
+    compact,
+    showNoData,
+    valueSelector,
+    prefs.speedUnit,
+    prefs.deltaUnit,
+    prefs.fuelUnit,
+    prefs.tempUnit,
+    prefs.pressureUnit,
+    prefs.appearance.backgroundPreset,
+    prefs.appearance.backgroundCustom,
+  ]);
+
+  useEffect(() => {
+    if (!plotRef.current || !rootRef.current) return;
+    plotRef.current.setSize({
+      width: rootRef.current.clientWidth,
+      height,
+    });
+  }, [height]);
+
+  return (
+    <div className={`chart-panel${compact ? " chart-panel-compact" : ""}`}>
+      {showNoData ? (
+        <div className="chart-no-data">
+          <span className="muted">{title} — No data</span>
+        </div>
+      ) : samplesByLap.length === 0 ||
+        (samplesByLap[0]?.samples.length ?? 0) === 0 ? (
+        <p className="muted small chart-empty">{title} — loading…</p>
+      ) : null}
+      <div className="chart-panel-plot" ref={rootRef} />
+    </div>
+  );
+}
+
+export const CHANNELS: SeriesConfig[] = [
+  { key: "speed_mps", label: "Speed", color: "#38bdf8" },
+  { key: "throttle", label: "Throttle", color: "#4ade80" },
+  { key: "brake", label: "Brake", color: "#f87171" },
+  { key: "steering", label: "Steering", color: "#a78bfa" },
+  { key: "gear", label: "Gear", color: "#fbbf24" },
+  { key: "rpm", label: "RPM", color: "#fb7185" },
+  { key: "lap_time_s", label: "Time Delta", color: "#e2e8f0" },
+];
+
+export const LAP_COLORS = ["#38bdf8", "#f472b6", "#fbbf24", "#4ade80"];

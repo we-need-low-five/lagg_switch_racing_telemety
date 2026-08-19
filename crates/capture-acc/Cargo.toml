@@ -1,0 +1,13 @@
+[package]
+name = "sim-capture-acc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-core = { workspace = true }
+sim-capture-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+acc_shared_memory_rs = "0.8"

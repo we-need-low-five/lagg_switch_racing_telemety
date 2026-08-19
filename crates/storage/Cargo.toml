@@ -1,0 +1,23 @@
+[package]
+name = "sim-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { version = "54", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow = { version = "54", default-features = false, features = ["json"] }
+arrow-array = "54"
+arrow-schema = "54"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

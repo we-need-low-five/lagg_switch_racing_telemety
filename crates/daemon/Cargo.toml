@@ -1,0 +1,19 @@
+[package]
+name = "sim-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim-core = { workspace = true }
+sim-storage = { workspace = true }
+sim-capture-acc = { workspace = true }
+sim-capture-ac = { workspace = true }
+sim-capture-lmu = { workspace = true }
+sim-capture-f1 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+sysinfo = "0.33"

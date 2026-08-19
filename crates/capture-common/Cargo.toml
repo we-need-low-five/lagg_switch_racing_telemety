@@ -1,0 +1,12 @@
+[package]
+name = "sim-capture-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security",
+] }
