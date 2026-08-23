@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/capture-common",
+    "crates/capture-acc",
+    "crates/capture-ac",
+    "crates/capture-lmu",
+    "crates/capture-f1",
+    "crates/daemon",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+sim-core = { path = "crates/core" }
+sim-storage = { path = "crates/storage" }
+sim-capture-common = { path = "crates/capture-common" }
+sim-capture-acc = { path = "crates/capture-acc" }
+sim-capture-ac = { path = "crates/capture-ac" }
+sim-capture-lmu = { path = "crates/capture-lmu" }
+sim-capture-f1 = { path = "crates/capture-f1" }
+sim-daemon = { path = "crates/daemon" }
