@@ -34,7 +34,7 @@ These phases are done and form the shared platform:
 
 - [x] Tauri 2 app with system tray, recording daemon thread, SQLite + Parquet storage
 - [x] `GameAdapter` trait + game detector routing
-- [x] Session/lap schema, distance-grid resampling (`DISTANCE_GRID_POINTS = 1000`)
+- [x] Session/lap schema, distance-grid resampling (`DISTANCE_GRID_POINTS = 4000`)
 - [x] Recording service: lap start/complete, flush to Parquet, best-lap refresh, pin lap
 - [x] IPC commands: `list_sessions`, `list_laps`, `load_lap_samples`, `get_session`, recording controls, bundle export/import
 
@@ -274,7 +274,7 @@ Run after each adapter parity pass:
 |-------|----------------|
 | Game detection | Launch game → tray shows recording notification |
 | Session metadata | DB row has correct `track_id`, `track`, `car`, `player_name` |
-| Sample rate | Parquet file >> 1 KB; ~1000 rows per lap |
+| Sample rate | Parquet file >> 1 KB; ~4000 rows per lap |
 | Lap validity | Pit lap marked invalid; clean lap marked valid |
 | Best lap | Fastest valid lap gets `is_best` |
 | Charts | All channels show data on Analyze tab |

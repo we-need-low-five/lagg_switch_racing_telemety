@@ -899,7 +899,11 @@ export function LapCompareView({
             >
               <TractionCircle
                 samplesByLap={chartSeries}
-                cursorPct={trackCursorPct}
+                cursorPct={mapCursorToRangeLocal(
+                  trackCursorPct,
+                  segmentTab,
+                  segmentRanges,
+                )}
               />
             </CollapsiblePanel>
           </div>

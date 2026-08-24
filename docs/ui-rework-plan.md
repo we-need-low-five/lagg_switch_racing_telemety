@@ -81,7 +81,7 @@ Interaction:
 
 - Derive segment elapsed times from distance-aligned samples (interpolate `time` / lap elapsed at 0%, 10%, …, 100%).
 - Delta strip: `compare − reference` per segment (same sign convention as today’s sector bars: negative = faster).
-- Prefer pure TS in `src/lib/` (e.g. extend/replace `sectors.ts`); reuse 1000-point grid already in samples where possible.
+- Prefer pure TS in `src/lib/` (e.g. extend/replace `sectors.ts`); reuse the distance grid already in samples where possible.
 - Chart zoom: filter/remap by `distance_pct` range for the selected segment (same mechanism as current sector zoom, different boundaries).
 
 ### Implementation touchpoints

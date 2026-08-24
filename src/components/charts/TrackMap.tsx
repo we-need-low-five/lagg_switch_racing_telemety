@@ -126,6 +126,7 @@ export function TrackMap({
 
   const cursorPoint =
     cursorPct == null ? null : metrics.pointAtPct(cursorPct);
+  const speedStride = Math.max(1, Math.round(primary.length / 125));
 
   return (
     <div className="track-map">
@@ -170,7 +171,7 @@ export function TrackMap({
         />
         {mode === "speed" &&
           primary
-            .filter((_, i) => i % 8 === 0)
+            .filter((_, i) => i % speedStride === 0)
             .map((s, i) => {
               const p = projectSample(s);
               return (
@@ -184,9 +185,10 @@ export function TrackMap({
               );
             })}
         {mode === "delta" &&
-          samplesByLap.map((lap) =>
-            lap.samples
-              .filter((_, i) => i % 12 === 0)
+          samplesByLap.map((lap) => {
+            const stride = Math.max(1, Math.round(lap.samples.length / 83));
+            return lap.samples
+              .filter((_, i) => i % stride === 0)
               .map((s, i) => {
                 const p = projectSample(s);
                 return (
@@ -199,8 +201,8 @@ export function TrackMap({
                     opacity={0.9}
                   />
                 );
-              }),
-          )}
+              });
+          })}
         {cursorPoint && (
           <circle
             cx={cursorPoint.x}

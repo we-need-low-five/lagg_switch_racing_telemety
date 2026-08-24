@@ -14,6 +14,24 @@ use tauri::{
     Manager,
 };
 
+/// Recorder poll interval. 3 ms matches ACC physics (~333 Hz) without spinning.
+const RECORDER_POLL_INTERVAL: Duration = Duration::from_millis(3);
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+}
+
+/// Windows `Sleep` defaults to ~15.6 ms unless the process requests a finer period.
+fn enable_high_resolution_timers() {
+    #[cfg(windows)]
+    // SAFETY: Requests 1 ms multimedia timer resolution for this process.
+    unsafe {
+        let _ = timeBeginPeriod(1);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -31,6 +49,7 @@ pub fn run() {
 
     let recorder_state = state.clone();
     thread::spawn(move || {
+        enable_high_resolution_timers();
         loop {
             // Only the recorder mutex is needed for polling; DB is locked briefly inside flush.
             if let Some(mut guard) = recorder_state.recorder.try_lock() {
@@ -38,7 +57,7 @@ pub fn run() {
                     recorder_state.set_last_notification(msg);
                 }
             }
-            thread::sleep(Duration::from_millis(8));
+            thread::sleep(RECORDER_POLL_INTERVAL);
         }
     });
 

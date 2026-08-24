@@ -14,7 +14,8 @@ interface TractionCircleProps {
 const WIDTH = 420;
 const HEIGHT = 320;
 const PAD = 36;
-const POINT_STRIDE = 4;
+/** Keep ~250 plotted points regardless of distance-grid density. */
+const TARGET_PLOT_POINTS = 250;
 /** GT3 envelope is ~2.5G; shared-memory spikes (kerbs/resets) must not set the scale. */
 const MAX_PLAUSIBLE_G = 4;
 
@@ -91,7 +92,11 @@ export function TractionCircle({
           peak = Math.max(peak, mag);
         }
       }
-      for (let i = 0; i < lap.samples.length; i += POINT_STRIDE) {
+      const stride = Math.max(
+        1,
+        Math.round(lap.samples.length / TARGET_PLOT_POINTS),
+      );
+      for (let i = 0; i < lap.samples.length; i += stride) {
         const s = lap.samples[i];
         const lat = s.g_force_x;
         const long = s.g_force_z;

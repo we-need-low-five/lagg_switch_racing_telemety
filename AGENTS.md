@@ -147,7 +147,7 @@ When adding a command: implement in `commands.rs`, register in `lib.rs`, add a t
 
 ### Recording / storage invariants
 
-- Distance-aligned samples use `DISTANCE_GRID_POINTS = 1000` (`sim-core`).
+- Distance-aligned samples use `DISTANCE_GRID_POINTS = 4000` (`sim-core`).
 - Lap files are Parquet under `sessions/{session_id}/laps/{lap_id}.parquet`.
 - Portable export format is **`.stb`** (ZIP); see `docs/bundle-format.md` — bump/`bundle_version` carefully.
 - ACC is the **reference adapter**; port parity (validity, sectors, track naming) from ACC when improving other games.

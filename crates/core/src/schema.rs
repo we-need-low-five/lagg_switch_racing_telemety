@@ -251,7 +251,10 @@ pub struct GameSetupStatus {
     pub message: String,
 }
 
-pub const DISTANCE_GRID_POINTS: usize = 1000;
+/// Distance-aligned samples written per lap. 4000 marks is ~1.25 m on a 5 km
+/// circuit — a 4× bump from the old 1000-point grid so 3 ms capture still
+/// improves corner resolution without storing a full time series (~20–30k).
+pub const DISTANCE_GRID_POINTS: usize = 4000;
 
 pub const CORE_PARQUET_CHANNELS: &[&str] = &[
     "distance_pct",

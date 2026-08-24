@@ -3,7 +3,7 @@ import type { DistanceSample } from "../types";
 import type { DistanceRange } from "./segments";
 import { filterSamplesToRange } from "./segments";
 
-export const DISTANCE_GRID_POINTS = 1000;
+export const DISTANCE_GRID_POINTS = 4000;
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
