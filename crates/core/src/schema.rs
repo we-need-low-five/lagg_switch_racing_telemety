@@ -77,6 +77,22 @@ pub struct TelemetrySample {
     pub tyre_press_rl: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tyre_press_rr: Option<f32>,
+    /// ACC physics.g_force (x=lat, y=vert, z=long).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_y: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_z: Option<f32>,
+    /// ACC physics.slip_angle (degrees per corner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_fl: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_fr: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_rl: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_rr: Option<f32>,
     pub raw: serde_json::Value,
 }
 
@@ -135,6 +151,20 @@ pub struct DistanceSample {
     pub tyre_press_rl: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tyre_press_rr: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_y: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub g_force_z: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_fl: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_fr: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_rl: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slip_angle_rr: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +277,13 @@ pub const EXTRA_PARQUET_CHANNELS: &[&str] = &[
     "tyre_press_fr",
     "tyre_press_rl",
     "tyre_press_rr",
+    "g_force_x",
+    "g_force_y",
+    "g_force_z",
+    "slip_angle_fl",
+    "slip_angle_fr",
+    "slip_angle_rl",
+    "slip_angle_rr",
 ];
 
 pub fn channel_manifest_json(samples: &[DistanceSample]) -> String {
@@ -270,6 +307,13 @@ pub fn distance_sample_has_channel(sample: &DistanceSample, name: &str) -> bool 
         "tyre_press_fr" => sample.tyre_press_fr.is_some(),
         "tyre_press_rl" => sample.tyre_press_rl.is_some(),
         "tyre_press_rr" => sample.tyre_press_rr.is_some(),
+        "g_force_x" => sample.g_force_x.is_some(),
+        "g_force_y" => sample.g_force_y.is_some(),
+        "g_force_z" => sample.g_force_z.is_some(),
+        "slip_angle_fl" => sample.slip_angle_fl.is_some(),
+        "slip_angle_fr" => sample.slip_angle_fr.is_some(),
+        "slip_angle_rl" => sample.slip_angle_rl.is_some(),
+        "slip_angle_rr" => sample.slip_angle_rr.is_some(),
         _ => true,
     }
 }

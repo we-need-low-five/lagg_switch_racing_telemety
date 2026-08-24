@@ -124,7 +124,17 @@ function isFixedZeroToHundred(key: keyof DistanceSample): boolean {
 }
 
 function isSymmetric(key: keyof DistanceSample): boolean {
-  return key === "steering" || key === "lap_time_s";
+  return (
+    key === "steering" ||
+    key === "lap_time_s" ||
+    key === "g_force_x" ||
+    key === "g_force_y" ||
+    key === "g_force_z" ||
+    key === "slip_angle_fl" ||
+    key === "slip_angle_fr" ||
+    key === "slip_angle_rl" ||
+    key === "slip_angle_rr"
+  );
 }
 
 function isTyreChannel(key: keyof DistanceSample): boolean {

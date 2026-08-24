@@ -592,6 +592,20 @@ impl GameAdapter for AccAdapter {
 
             tyre_press_rr: Some(physics.wheel_pressure.rear_right),
 
+            g_force_x: Some(physics.g_force.x),
+
+            g_force_y: Some(physics.g_force.y),
+
+            g_force_z: Some(physics.g_force.z),
+
+            slip_angle_fl: Some(physics.slip_angle.front_left),
+
+            slip_angle_fr: Some(physics.slip_angle.front_right),
+
+            slip_angle_rl: Some(physics.slip_angle.rear_left),
+
+            slip_angle_rr: Some(physics.slip_angle.rear_right),
+
             raw: serde_json::json!({
 
                 "physics": {

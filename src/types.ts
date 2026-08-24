@@ -57,6 +57,13 @@ export interface DistanceSample {
   tyre_press_fr?: number | null;
   tyre_press_rl?: number | null;
   tyre_press_rr?: number | null;
+  g_force_x?: number | null;
+  g_force_y?: number | null;
+  g_force_z?: number | null;
+  slip_angle_fl?: number | null;
+  slip_angle_fr?: number | null;
+  slip_angle_rl?: number | null;
+  slip_angle_rr?: number | null;
 }
 
 export type DistanceSampleChannel = keyof DistanceSample;

@@ -48,11 +48,13 @@ Adds optional lap metadata and extended Parquet channels (when recorded from ACC
 | `abs_level` | integer \| null | HUD ABS step at lap start |
 | `fuel_used_l` | number \| null | Liters consumed (lap end) |
 
-Optional Parquet columns (native units: L, °C, PSI):
+Optional Parquet columns (native units: L, °C, PSI, G, degrees):
 
 - `fuel` — liters remaining
 - `tyre_temp_fl`, `tyre_temp_fr`, `tyre_temp_rl`, `tyre_temp_rr`
 - `tyre_press_fl`, `tyre_press_fr`, `tyre_press_rl`, `tyre_press_rr`
+- `g_force_x`, `g_force_y`, `g_force_z` — ACC/AC g-force (x=lat, y=vert, z=long)
+- `slip_angle_fl`, `slip_angle_fr`, `slip_angle_rl`, `slip_angle_rr` — ACC slip angle (°)
 
 Corner order: **FL · FR · RL · RR**.
 

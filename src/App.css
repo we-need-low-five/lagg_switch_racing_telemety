@@ -780,21 +780,53 @@ input[type="color"] {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 0.5rem;
+  padding-bottom: 1rem;
 }
 
 .compare-right-map {
+  min-height: 0;
+  flex: 1.15;
+  display: flex;
+  flex-direction: column;
+}
+
+.compare-right-traction {
   min-height: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
 }
 
-.compare-right.map-collapsed .compare-right-map {
-  flex: 0 0 auto;
+.compare-right.right-split {
+  gap: 0;
 }
 
-.track-map-panel.collapsible-panel {
+.compare-right.right-split .compare-right-map,
+.compare-right.right-split .compare-right-traction {
+  min-height: 120px;
+  overflow: hidden;
+}
+
+.compare-right.map-collapsed .compare-right-map,
+.compare-right.right-split.map-collapsed .compare-right-map {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.compare-right.traction-collapsed .compare-right-traction,
+.compare-right.right-split.traction-collapsed .compare-right-traction {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.compare-right.map-collapsed:not(.traction-collapsed) .compare-right-traction,
+.compare-right.traction-collapsed:not(.map-collapsed) .compare-right-map {
+  flex: 1;
+}
+
+.track-map-panel.collapsible-panel,
+.traction-circle-panel.collapsible-panel {
   flex: 1;
   min-height: 0;
   height: 100%;
@@ -855,6 +887,56 @@ input[type="color"] {
   width: 100%;
   height: 100%;
   max-height: 100%;
+}
+
+.traction-circle {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.traction-circle.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.traction-circle svg {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+}
+
+.traction-circle-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: 0 0.15rem 0.15rem;
+}
+
+.traction-circle-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.traction-circle-swatch {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  flex-shrink: 0;
 }
 
 /* —— Lap panel (right column) —— */
@@ -1601,11 +1683,14 @@ input[type="color"] {
 /* —— Compare layout: splitters & collapsible —— */
 .resize-splitter {
   flex-shrink: 0;
-  background: var(--border-color);
+  background: transparent;
   transition: background 0.12s ease;
+  position: relative;
+  z-index: 2;
 }
 
-.resize-splitter:hover {
+.resize-splitter:hover,
+.resize-splitter:active {
   background: var(--link-color);
 }
 
@@ -1619,6 +1704,25 @@ input[type="color"] {
   height: 6px;
   cursor: row-resize;
   margin: 2px 0;
+}
+
+/* Enlarge hit target beyond the visible bar. */
+.resize-splitter-vertical::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+
+.resize-splitter-horizontal::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -6px;
+  bottom: -6px;
 }
 
 .collapsible-panel {
@@ -1675,7 +1779,8 @@ input[type="color"] {
   overflow: hidden;
 }
 
-.track-map-panel .collapsible-panel-body {
+.track-map-panel .collapsible-panel-body,
+.traction-circle-panel .collapsible-panel-body {
   padding: 0.35rem 0.5rem 0.5rem;
 }
 
@@ -1794,7 +1899,7 @@ input[type="color"] {
     max-width: none;
     position: relative;
     height: auto;
-    min-height: 360px;
+    min-height: 520px;
   }
 
   .sidebar.icon-rail.show-labels {

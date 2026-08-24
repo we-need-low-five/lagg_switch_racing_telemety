@@ -56,6 +56,13 @@ fn interpolate_sample(
         tyre_press_fr: lerp_opt(a.tyre_press_fr, b.tyre_press_fr, t),
         tyre_press_rl: lerp_opt(a.tyre_press_rl, b.tyre_press_rl, t),
         tyre_press_rr: lerp_opt(a.tyre_press_rr, b.tyre_press_rr, t),
+        g_force_x: lerp_opt(a.g_force_x, b.g_force_x, t),
+        g_force_y: lerp_opt(a.g_force_y, b.g_force_y, t),
+        g_force_z: lerp_opt(a.g_force_z, b.g_force_z, t),
+        slip_angle_fl: lerp_opt(a.slip_angle_fl, b.slip_angle_fl, t),
+        slip_angle_fr: lerp_opt(a.slip_angle_fr, b.slip_angle_fr, t),
+        slip_angle_rl: lerp_opt(a.slip_angle_rl, b.slip_angle_rl, t),
+        slip_angle_rr: lerp_opt(a.slip_angle_rr, b.slip_angle_rr, t),
     }
 }
 
@@ -168,6 +175,13 @@ mod tests {
             tyre_press_fr: None,
             tyre_press_rl: None,
             tyre_press_rr: None,
+            g_force_x: None,
+            g_force_y: None,
+            g_force_z: None,
+            slip_angle_fl: None,
+            slip_angle_fr: None,
+            slip_angle_rl: None,
+            slip_angle_rr: None,
             raw: serde_json::json!({}),
         }
     }

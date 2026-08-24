@@ -167,6 +167,13 @@ impl GameAdapter for AcAdapter {
             tyre_press_fr: Some(physics.wheels_pressure[1]),
             tyre_press_rl: Some(physics.wheels_pressure[2]),
             tyre_press_rr: Some(physics.wheels_pressure[3]),
+            g_force_x: Some(physics.acc_g[0]),
+            g_force_y: Some(physics.acc_g[1]),
+            g_force_z: Some(physics.acc_g[2]),
+            slip_angle_fl: None,
+            slip_angle_fr: None,
+            slip_angle_rl: None,
+            slip_angle_rr: None,
             raw: serde_json::json!({
                 "wheel_slip": physics.wheel_slip,
                 "velocity": physics.velocity,

@@ -54,7 +54,14 @@ function usesTwoDecimalFormat(key: keyof DistanceSample): boolean {
     key === "tyre_press_fl" ||
     key === "tyre_press_fr" ||
     key === "tyre_press_rl" ||
-    key === "tyre_press_rr"
+    key === "tyre_press_rr" ||
+    key === "g_force_x" ||
+    key === "g_force_y" ||
+    key === "g_force_z" ||
+    key === "slip_angle_fl" ||
+    key === "slip_angle_fr" ||
+    key === "slip_angle_rl" ||
+    key === "slip_angle_rr"
   );
 }
 
@@ -145,6 +152,15 @@ function legendValueSuffix(
     case "tyre_press_rl":
     case "tyre_press_rr":
       return pressureUnitLabel(prefs.pressureUnit);
+    case "g_force_x":
+    case "g_force_y":
+    case "g_force_z":
+      return "G";
+    case "slip_angle_fl":
+    case "slip_angle_fr":
+    case "slip_angle_rl":
+    case "slip_angle_rr":
+      return "°";
     case "steering":
       return null;
     default:
@@ -199,6 +215,15 @@ function yAxisLabel(
     case "tyre_press_rl":
     case "tyre_press_rr":
       return `Pressure (${pressureUnitLabel(prefs.pressureUnit)})`;
+    case "g_force_x":
+    case "g_force_y":
+    case "g_force_z":
+      return "G-force (G)";
+    case "slip_angle_fl":
+    case "slip_angle_fr":
+    case "slip_angle_rl":
+    case "slip_angle_rr":
+      return "Slip angle (°)";
     default:
       return "";
   }

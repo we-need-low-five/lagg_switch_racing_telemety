@@ -12,6 +12,7 @@ export interface LayoutPrefs {
   chartHeights: Record<string, number>;
   chartCollapsed: Record<string, boolean>;
   mapCollapsed: boolean;
+  tractionCircleCollapsed: boolean;
   lapsCollapsed: boolean;
 }
 
@@ -62,6 +63,7 @@ const DEFAULT_LAYOUT: LayoutPrefs = {
   chartHeights: {},
   chartCollapsed: {},
   mapCollapsed: false,
+  tractionCircleCollapsed: false,
   lapsCollapsed: false,
 };
 
@@ -100,6 +102,7 @@ function mergeLayout(parsed: Partial<LayoutPrefs> | undefined): LayoutPrefs {
     chartHeights: { ...parsed.chartHeights },
     chartCollapsed: { ...parsed.chartCollapsed },
     mapCollapsed: parsed.mapCollapsed ?? false,
+    tractionCircleCollapsed: parsed.tractionCircleCollapsed ?? false,
     lapsCollapsed: parsed.lapsCollapsed ?? false,
   };
 }

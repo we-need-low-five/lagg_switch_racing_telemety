@@ -282,6 +282,13 @@ impl GameAdapter for F1Adapter {
             tyre_press_fr: None,
             tyre_press_rl: None,
             tyre_press_rr: None,
+            g_force_x: None,
+            g_force_y: None,
+            g_force_z: None,
+            slip_angle_fl: None,
+            slip_angle_fr: None,
+            slip_angle_rl: None,
+            slip_angle_rr: None,
             raw: serde_json::json!({
                 "pit_status": pit_status,
                 "sector": sector,

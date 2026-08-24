@@ -49,3 +49,30 @@ export const TYRE_PRESS_LABELS: Record<(typeof TYRE_PRESS_CHANNELS)[number], str
   tyre_press_rl: "RL",
   tyre_press_rr: "RR",
 };
+
+/** ACC/AC g-force axes: x=lateral, y=vertical, z=longitudinal. */
+export const G_FORCE_CHANNELS = [
+  "g_force_x",
+  "g_force_y",
+  "g_force_z",
+] as const satisfies readonly DistanceSampleChannel[];
+
+export const G_FORCE_LABELS: Record<(typeof G_FORCE_CHANNELS)[number], string> = {
+  g_force_x: "Lat",
+  g_force_y: "Vert",
+  g_force_z: "Long",
+};
+
+export const SLIP_ANGLE_CHANNELS = [
+  "slip_angle_fl",
+  "slip_angle_fr",
+  "slip_angle_rl",
+  "slip_angle_rr",
+] as const satisfies readonly DistanceSampleChannel[];
+
+export const SLIP_ANGLE_LABELS: Record<(typeof SLIP_ANGLE_CHANNELS)[number], string> = {
+  slip_angle_fl: "FL",
+  slip_angle_fr: "FR",
+  slip_angle_rl: "RL",
+  slip_angle_rr: "RR",
+};

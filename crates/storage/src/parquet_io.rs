@@ -125,6 +125,13 @@ fn row_to_sample(cols: &HashMap<String, Vec<f32>>, row: usize) -> DistanceSample
         tyre_press_fr: read_optional_col(cols, "tyre_press_fr", row),
         tyre_press_rl: read_optional_col(cols, "tyre_press_rl", row),
         tyre_press_rr: read_optional_col(cols, "tyre_press_rr", row),
+        g_force_x: read_optional_col(cols, "g_force_x", row),
+        g_force_y: read_optional_col(cols, "g_force_y", row),
+        g_force_z: read_optional_col(cols, "g_force_z", row),
+        slip_angle_fl: read_optional_col(cols, "slip_angle_fl", row),
+        slip_angle_fr: read_optional_col(cols, "slip_angle_fr", row),
+        slip_angle_rl: read_optional_col(cols, "slip_angle_rl", row),
+        slip_angle_rr: read_optional_col(cols, "slip_angle_rr", row),
     }
 }
 
@@ -165,6 +172,13 @@ fn sample_column(samples: &[DistanceSample], name: &str) -> Vec<f32> {
             "tyre_press_fr" => s.tyre_press_fr.unwrap_or(f32::NAN),
             "tyre_press_rl" => s.tyre_press_rl.unwrap_or(f32::NAN),
             "tyre_press_rr" => s.tyre_press_rr.unwrap_or(f32::NAN),
+            "g_force_x" => s.g_force_x.unwrap_or(f32::NAN),
+            "g_force_y" => s.g_force_y.unwrap_or(f32::NAN),
+            "g_force_z" => s.g_force_z.unwrap_or(f32::NAN),
+            "slip_angle_fl" => s.slip_angle_fl.unwrap_or(f32::NAN),
+            "slip_angle_fr" => s.slip_angle_fr.unwrap_or(f32::NAN),
+            "slip_angle_rl" => s.slip_angle_rl.unwrap_or(f32::NAN),
+            "slip_angle_rr" => s.slip_angle_rr.unwrap_or(f32::NAN),
             _ => f32::NAN,
         })
         .collect()
@@ -202,6 +216,13 @@ mod tests {
             tyre_press_fr: None,
             tyre_press_rl: None,
             tyre_press_rr: None,
+            g_force_x: None,
+            g_force_y: None,
+            g_force_z: None,
+            slip_angle_fl: None,
+            slip_angle_fr: None,
+            slip_angle_rl: None,
+            slip_angle_rr: None,
         }
     }
 
@@ -234,6 +255,13 @@ mod tests {
                 tyre_press_fr: Some(27.1),
                 tyre_press_rl: Some(26.8),
                 tyre_press_rr: Some(26.9),
+                g_force_x: Some(1.2),
+                g_force_y: Some(0.1),
+                g_force_z: Some(-0.8),
+                slip_angle_fl: Some(2.5),
+                slip_angle_fr: Some(2.6),
+                slip_angle_rl: Some(3.1),
+                slip_angle_rr: Some(3.0),
                 ..base_sample(i)
             })
             .collect();
@@ -242,5 +270,7 @@ mod tests {
         assert_eq!(loaded.len(), DISTANCE_GRID_POINTS);
         assert!((loaded[100].fuel.unwrap() - samples[100].fuel.unwrap()).abs() < 0.001);
         assert!((loaded[100].tyre_press_rr.unwrap() - 26.9).abs() < f32::EPSILON);
+        assert!((loaded[100].g_force_x.unwrap() - 1.2).abs() < f32::EPSILON);
+        assert!((loaded[100].slip_angle_rr.unwrap() - 3.0).abs() < f32::EPSILON);
     }
 }

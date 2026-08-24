@@ -3,6 +3,7 @@ import type uPlot from "uplot";
 import { DistanceChart } from "../charts/DistanceChart";
 import { SegmentDeltaStrip } from "../charts/SegmentDeltaStrip";
 import { TrackMap } from "../charts/TrackMap";
+import { TractionCircle } from "../charts/TractionCircle";
 import {
   CollapsibleChart,
   CollapsiblePanel,
@@ -83,19 +84,25 @@ export interface LapCompareViewProps {
 
 const TYRE_CHART_HEIGHT = 160;
 
+type ExtraChannel =
+  | (typeof TYRE_TEMP_CHANNELS)[number]
+  | (typeof TYRE_PRESS_CHANNELS)[number];
+
+const ALL_EXTRA_CHANNELS = [
+  ...TYRE_TEMP_CHANNELS,
+  ...TYRE_PRESS_CHANNELS,
+] as const;
+
 interface CompareChartsColumnProps {
   selectedIds: string[];
   game?: GameId | null;
   deltaSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   chartSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
-  tyreSeriesByChannel: Record<
-    (typeof TYRE_TEMP_CHANNELS)[number] | (typeof TYRE_PRESS_CHANNELS)[number],
+  extraSeriesByChannel: Record<
+    ExtraChannel,
     Array<{ label: string; color: string; samples: DistanceSample[] }>
   >;
-  tyreNoDataByChannel: Record<
-    (typeof TYRE_TEMP_CHANNELS)[number] | (typeof TYRE_PRESS_CHANNELS)[number],
-    boolean
-  >;
+  extraNoDataByChannel: Record<ExtraChannel, boolean>;
   fuelUsedSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   fuelShowNoData: boolean;
   scaleChartSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
@@ -119,8 +126,8 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
   game,
   deltaSeries,
   chartSeries,
-  tyreSeriesByChannel,
-  tyreNoDataByChannel,
+  extraSeriesByChannel,
+  extraNoDataByChannel,
   fuelUsedSeries,
   fuelShowNoData,
   scaleChartSeries,
@@ -138,7 +145,7 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
   onPlotMount,
   onPlotUnmount,
 }: CompareChartsColumnProps) {
-  const renderTyreGroup = (
+  const renderChannelGroup = (
     groupKey: string,
     keys: readonly DistanceSampleChannel[],
     labels: Record<string, string>,
@@ -170,8 +177,8 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
               title={labels[key] ?? key}
               channelKey={key}
               game={game}
-              samplesByLap={tyreSeriesByChannel[key as keyof typeof tyreSeriesByChannel] ?? []}
-              showNoData={tyreNoDataByChannel[key as keyof typeof tyreNoDataByChannel] ?? false}
+              samplesByLap={extraSeriesByChannel[key as ExtraChannel] ?? []}
+              showNoData={extraNoDataByChannel[key as ExtraChannel] ?? false}
               yRange={yRange}
               onCursorMove={onChartCursorMove}
               onPlotMount={onPlotMount}
@@ -247,14 +254,14 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
         </CollapsibleChart>
       ))}
 
-      {renderTyreGroup(
+      {renderChannelGroup(
         "tyre_temps",
         TYRE_TEMP_CHANNELS,
         TYRE_CORNER_LABELS,
         "Tyre core temps",
         tyreTempYRange,
       )}
-      {renderTyreGroup(
+      {renderChannelGroup(
         "tyre_pressures",
         TYRE_PRESS_CHANNELS,
         TYRE_PRESS_LABELS,
@@ -308,6 +315,9 @@ export function LapCompareView({
   const [showLaps, setShowLaps] = useState(false);
   const [segmentTab, setSegmentTab] = useState<SegmentTab>("full");
   const [liveColumnSplitPct, setLiveColumnSplitPct] = useState<number | null>(null);
+  const [liveMapSplitPct, setLiveMapSplitPct] = useState<number | null>(null);
+  const columnSplitPctRef = useRef(prefs.layout.columnSplitPct);
+  const mapSplitPctRef = useRef(prefs.layout.mapLapSplitPct);
 
   const chartPlotsRef = useRef<Set<uPlot>>(new Set());
   const gridRef = useRef<HTMLDivElement>(null);
@@ -359,6 +369,12 @@ export function LapCompareView({
   );
 
   const columnSplitPct = liveColumnSplitPct ?? prefs.layout.columnSplitPct;
+  const mapSplitPct = liveMapSplitPct ?? prefs.layout.mapLapSplitPct;
+  columnSplitPctRef.current = columnSplitPct;
+  mapSplitPctRef.current = mapSplitPct;
+  const mapExpanded = !prefs.layout.mapCollapsed;
+  const tractionExpanded = !prefs.layout.tractionCircleCollapsed;
+  const bothRightPanelsExpanded = mapExpanded && tractionExpanded;
 
   const selectedMetas = useMemo(
     () =>
@@ -441,24 +457,22 @@ export function LapCompareView({
     [metasWithSamples, samples, activeSegmentRange, mode, lapColorForId],
   );
 
-  const tyreSeriesByChannel = useMemo(() => {
-    const channels = [...TYRE_TEMP_CHANNELS, ...TYRE_PRESS_CHANNELS] as const;
+  const extraSeriesByChannel = useMemo(() => {
     return Object.fromEntries(
-      channels.map((key) => [key, buildChannelSeries(key)]),
-    ) as CompareChartsColumnProps["tyreSeriesByChannel"];
+      ALL_EXTRA_CHANNELS.map((key) => [key, buildChannelSeries(key)]),
+    ) as CompareChartsColumnProps["extraSeriesByChannel"];
   }, [buildChannelSeries]);
 
-  const tyreNoDataByChannel = useMemo(() => {
-    const channels = [...TYRE_TEMP_CHANNELS, ...TYRE_PRESS_CHANNELS] as const;
+  const extraNoDataByChannel = useMemo(() => {
     return Object.fromEntries(
-      channels.map((key) => [
+      ALL_EXTRA_CHANNELS.map((key) => [
         key,
         metasWithSamples.length > 0 &&
           !metasWithSamples.some((meta) =>
             lapHasChannel(samples[meta.lapId] ?? [], key),
           ),
       ]),
-    ) as CompareChartsColumnProps["tyreNoDataByChannel"];
+    ) as CompareChartsColumnProps["extraNoDataByChannel"];
   }, [metasWithSamples, samples]);
 
   const fuelUsedSeries = useMemo(
@@ -600,24 +614,39 @@ export function LapCompareView({
     }
   }, [segmentTab, segmentRanges, applyChartsCursor]);
 
-  const handleColumnDrag = useCallback(
-    (deltaPx: number) => {
-      if (!gridRef.current) return;
-      const total = gridRef.current.clientWidth;
-      if (total <= 0) return;
-      const deltaPct = (deltaPx / total) * 100;
-      const base = liveColumnSplitPct ?? prefs.layout.columnSplitPct;
-      const next = Math.min(85, Math.max(35, base + deltaPct));
-      setLiveColumnSplitPct(next);
-    },
-    [liveColumnSplitPct, prefs.layout.columnSplitPct],
-  );
+  const handleColumnDrag = useCallback((deltaPx: number) => {
+    if (!gridRef.current) return;
+    const total = gridRef.current.clientWidth;
+    if (total <= 0) return;
+    const next = Math.min(
+      85,
+      Math.max(35, columnSplitPctRef.current + (deltaPx / total) * 100),
+    );
+    columnSplitPctRef.current = next;
+    setLiveColumnSplitPct(next);
+  }, []);
 
   const handleColumnDragEnd = useCallback(() => {
-    if (liveColumnSplitPct == null) return;
-    setPrefs({ layout: { columnSplitPct: liveColumnSplitPct } });
+    setPrefs({ layout: { columnSplitPct: columnSplitPctRef.current } });
     setLiveColumnSplitPct(null);
-  }, [liveColumnSplitPct, setPrefs]);
+  }, [setPrefs]);
+
+  const handleMapTractionDrag = useCallback((deltaPx: number) => {
+    if (!rightColRef.current) return;
+    const total = rightColRef.current.clientHeight;
+    if (total <= 0) return;
+    const next = Math.min(
+      80,
+      Math.max(20, mapSplitPctRef.current + (deltaPx / total) * 100),
+    );
+    mapSplitPctRef.current = next;
+    setLiveMapSplitPct(next);
+  }, []);
+
+  const handleMapTractionDragEnd = useCallback(() => {
+    setPrefs({ layout: { mapLapSplitPct: mapSplitPctRef.current } });
+    setLiveMapSplitPct(null);
+  }, [setPrefs]);
 
   const handleChartResizeCommit = useCallback(
     (key: string, height: number) => {
@@ -730,8 +759,8 @@ export function LapCompareView({
             game={game}
             deltaSeries={deltaSeries}
             chartSeries={chartSeries}
-            tyreSeriesByChannel={tyreSeriesByChannel}
-            tyreNoDataByChannel={tyreNoDataByChannel}
+            extraSeriesByChannel={extraSeriesByChannel}
+            extraNoDataByChannel={extraNoDataByChannel}
             fuelUsedSeries={fuelUsedSeries}
             fuelShowNoData={fuelShowNoData}
             scaleChartSeries={fullChartSeries}
@@ -761,9 +790,20 @@ export function LapCompareView({
           ref={rightColRef}
           className={`compare-right${
             prefs.layout.mapCollapsed ? " map-collapsed" : ""
-          }`}
+          }${
+            prefs.layout.tractionCircleCollapsed
+              ? " traction-collapsed"
+              : ""
+          }${bothRightPanelsExpanded ? " right-split" : ""}`}
         >
-          <div className="compare-right-map">
+          <div
+            className="compare-right-map"
+            style={
+              bothRightPanelsExpanded
+                ? { flex: `0 0 ${mapSplitPct}%` }
+                : undefined
+            }
+          >
             <CollapsiblePanel
               title="Track Map"
               collapsed={prefs.layout.mapCollapsed}
@@ -827,6 +867,40 @@ export function LapCompareView({
                   onCursorMove={handleTrackMapCursorMove}
                 />
               )}
+            </CollapsiblePanel>
+          </div>
+
+          {bothRightPanelsExpanded && (
+            <ResizeSplitter
+              orientation="horizontal"
+              onDrag={handleMapTractionDrag}
+              onDragEnd={handleMapTractionDragEnd}
+            />
+          )}
+
+          <div
+            className="compare-right-traction"
+            style={
+              bothRightPanelsExpanded ? { flex: "1 1 0" } : undefined
+            }
+          >
+            <CollapsiblePanel
+              title="Traction Circle"
+              collapsed={prefs.layout.tractionCircleCollapsed}
+              onToggle={() =>
+                setPrefs({
+                  layout: {
+                    tractionCircleCollapsed:
+                      !prefs.layout.tractionCircleCollapsed,
+                  },
+                })
+              }
+              className="traction-circle-panel"
+            >
+              <TractionCircle
+                samplesByLap={chartSeries}
+                cursorPct={trackCursorPct}
+              />
             </CollapsiblePanel>
           </div>
         </aside>

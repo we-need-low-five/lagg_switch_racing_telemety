@@ -11,34 +11,43 @@ export function ResizeSplitter({
   onDrag,
   onDragEnd,
 }: ResizeSplitterProps) {
-  const dragging = useRef(false);
-  const lastPos = useRef(0);
+  // Keep latest handlers in refs so document listeners opened on mousedown
+  // never close over a stale onDrag (which caused splits to snap back).
+  const onDragRef = useRef(onDrag);
+  const onDragEndRef = useRef(onDragEnd);
+  onDragRef.current = onDrag;
+  onDragEndRef.current = onDragEnd;
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
-      dragging.current = true;
-      lastPos.current = orientation === "vertical" ? e.clientX : e.clientY;
+      e.stopPropagation();
+      let lastPos = orientation === "vertical" ? e.clientX : e.clientY;
+      const cursor = orientation === "vertical" ? "col-resize" : "row-resize";
+      const prevCursor = document.body.style.cursor;
+      const prevUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = "none";
 
       function onMouseMove(ev: MouseEvent) {
-        if (!dragging.current) return;
         const pos = orientation === "vertical" ? ev.clientX : ev.clientY;
-        const delta = pos - lastPos.current;
-        lastPos.current = pos;
-        onDrag(delta);
+        const delta = pos - lastPos;
+        lastPos = pos;
+        if (delta !== 0) onDragRef.current(delta);
       }
 
       function onMouseUp() {
-        dragging.current = false;
         document.removeEventListener("mousemove", onMouseMove);
         document.removeEventListener("mouseup", onMouseUp);
-        onDragEnd?.();
+        document.body.style.cursor = prevCursor;
+        document.body.style.userSelect = prevUserSelect;
+        onDragEndRef.current?.();
       }
 
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
     },
-    [orientation, onDrag, onDragEnd],
+    [orientation],
   );
 
   return (
