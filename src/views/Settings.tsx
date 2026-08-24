@@ -113,8 +113,9 @@ export function Settings() {
 
             <h2>Inputs</h2>
             <p className="muted">
-              Throttle and brake are shown as %. ACC steering is wheel angle in
-              degrees. Other games show steering as L/R with % magnitude.
+              Throttle and brake are shown as %. ACC steering is degrees on a
+              ±100° scale (100 = full lock), labeled L/R. Other games show
+              steering as L/R with % magnitude.
             </p>
 
             <h2>Fuel</h2>

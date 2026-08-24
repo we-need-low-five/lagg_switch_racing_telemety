@@ -11,6 +11,7 @@ pub fn resample_to_distance_grid(samples: &[TelemetrySample]) -> Vec<DistanceSam
         return linear_time_grid(samples);
     }
 
+    let held = held_gears(samples);
     let mut grid = Vec::with_capacity(DISTANCE_GRID_POINTS);
     for point in 0..DISTANCE_GRID_POINTS {
         let target = (point as f32 / (DISTANCE_GRID_POINTS - 1) as f32) * total_distance;
@@ -24,9 +25,20 @@ pub fn resample_to_distance_grid(samples: &[TelemetrySample]) -> Vec<DistanceSam
         let t = ((target - cumulative[prev]) / span).clamp(0.0, 1.0);
         let a = &samples[prev];
         let b = &samples[idx];
-        grid.push(interpolate_sample(a, b, t, point));
+        grid.push(interpolate_sample(a, b, t, point, held[prev], held[idx]));
     }
     grid
+}
+
+fn held_gears(samples: &[TelemetrySample]) -> Vec<i32> {
+    let mut held = samples[0].gear;
+    samples
+        .iter()
+        .map(|s| {
+            held = crate::hold_transient_gear(held, s.gear);
+            held
+        })
+        .collect()
 }
 
 fn interpolate_sample(
@@ -34,6 +46,8 @@ fn interpolate_sample(
     b: &TelemetrySample,
     t: f32,
     point: usize,
+    gear_a: i32,
+    gear_b: i32,
 ) -> DistanceSample {
     DistanceSample {
         distance_pct: point as f32 / (DISTANCE_GRID_POINTS - 1) as f32 * 100.0,
@@ -42,7 +56,7 @@ fn interpolate_sample(
         throttle: lerp(a.throttle, b.throttle, t),
         brake: lerp(a.brake, b.brake, t),
         steering: lerp(a.steering, b.steering, t),
-        gear: lerp(a.gear as f32, b.gear as f32, t),
+        gear: if t < 1.0 { gear_a as f32 } else { gear_b as f32 },
         rpm: lerp(a.rpm, b.rpm, t),
         pos_x: lerp(a.pos_x, b.pos_x, t),
         pos_y: lerp(a.pos_y, b.pos_y, t),
@@ -69,6 +83,7 @@ fn interpolate_sample(
 fn linear_time_grid(samples: &[TelemetrySample]) -> Vec<DistanceSample> {
     let mut grid = Vec::with_capacity(DISTANCE_GRID_POINTS);
     let last = samples.len() - 1;
+    let held = held_gears(samples);
     for point in 0..DISTANCE_GRID_POINTS {
         let t_idx = (point as f32 / (DISTANCE_GRID_POINTS - 1) as f32) * last as f32;
         let prev = t_idx.floor() as usize;
@@ -76,7 +91,14 @@ fn linear_time_grid(samples: &[TelemetrySample]) -> Vec<DistanceSample> {
         let frac = t_idx - prev as f32;
         let a = &samples[prev];
         let b = &samples[next];
-        grid.push(interpolate_sample(a, b, frac, point));
+        grid.push(interpolate_sample(
+            a,
+            b,
+            frac,
+            point,
+            held[prev],
+            held[next],
+        ));
     }
     grid
 }
@@ -218,6 +240,24 @@ mod tests {
         let grid = resample_to_distance_grid(&samples);
         assert!(grid.iter().all(|s| s.fuel.is_some()));
         assert!(grid.iter().all(|s| s.tyre_temp_fl.is_some()));
+    }
+
+    #[test]
+    fn resample_holds_neutral_gear_blips() {
+        let mut samples: Vec<TelemetrySample> = (0..30).map(|i| sample(i, None)).collect();
+        for s in &mut samples {
+            s.gear = 4;
+        }
+        samples[10].gear = 1;
+        samples[11].gear = 1;
+        samples[12].gear = 5;
+        for s in samples.iter_mut().skip(13) {
+            s.gear = 5;
+        }
+        let grid = resample_to_distance_grid(&samples);
+        assert!(grid.iter().all(|s| s.gear >= 4.0));
+        assert!(grid.iter().any(|s| s.gear >= 5.0));
+        assert!(grid.iter().all(|s| (s.gear - s.gear.round()).abs() < 1e-5));
     }
 
     #[test]

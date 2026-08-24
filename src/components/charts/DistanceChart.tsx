@@ -8,9 +8,10 @@ import {
   tempUnitLabel,
   usePreferences,
 } from "../../lib/preferences";
+import { holdGearThroughNeutral } from "../../lib/gear";
 import { alignLapSamples } from "../../lib/chartAlign";
 import {
-  accSteeringIsLegacyNormalized,
+  accSteeringIsRawInput,
   collectDisplayValues,
   steeringIsDegrees,
   transformChannelValue,
@@ -94,13 +95,10 @@ function formatSteeringReadout(
   game?: GameId | null,
 ): string {
   if (val == null || !Number.isFinite(val)) return "";
-  const rounded = Math.round(val);
-  if (steeringIsDegrees(game)) {
-    return `${rounded}°`;
-  }
-  if (rounded === 0) return "0%";
-  const pct = Math.abs(rounded);
-  return rounded < 0 ? `L ${pct}%` : `R ${pct}%`;
+  const mag = Math.abs(val).toFixed(2);
+  const unit = steeringIsDegrees(game) ? "°" : "%";
+  if (mag === "0.00") return `0.00${unit}`;
+  return val > 0 ? `L ${mag}${unit}` : `R ${mag}${unit}`;
 }
 
 function formatLegendValueBody(
@@ -322,24 +320,30 @@ export function DistanceChart({
       const alignedSamples = aligned[i];
       if (alignedSamples.length !== x.length) continue;
 
-      const accLegacySteering =
+      const accRawSteering =
         channelKey === "steering" &&
         game === "acc" &&
-        accSteeringIsLegacyNormalized(alignedSamples);
+        accSteeringIsRawInput(alignedSamples);
 
-      data.push(
-        alignedSamples.map((s) => {
-          const raw = valueSelector ? valueSelector(s) : Number(s[channelKey]);
-          if (raw == null || !Number.isFinite(raw)) return null;
-          return transformChannelValue(
-            channelKey,
-            raw,
-            prefsRef.current,
-            game,
-            accLegacySteering,
-          );
-        }),
-      );
+      if (channelKey === "gear" && !valueSelector) {
+        data.push(
+          holdGearThroughNeutral(alignedSamples.map((s) => Number(s.gear))),
+        );
+      } else {
+        data.push(
+          alignedSamples.map((s) => {
+            const raw = valueSelector ? valueSelector(s) : Number(s[channelKey]);
+            if (raw == null || !Number.isFinite(raw)) return null;
+            return transformChannelValue(
+              channelKey,
+              raw,
+              prefsRef.current,
+              game,
+              accRawSteering,
+            );
+          }),
+        );
+      }
       series.push({
         label: lap.label,
         stroke: lap.color,

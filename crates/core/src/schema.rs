@@ -51,7 +51,7 @@ pub struct TelemetrySample {
     pub speed_mps: f32,
     pub throttle: f32,
     pub brake: f32,
-    /// ACC: steering-wheel degrees. Other games typically −1…1.
+    /// ACC: degrees on a ±100° scale (shared-memory input × 100). Other games typically −1…1.
     pub steering: f32,
     pub gear: i32,
     pub rpm: f32,
@@ -126,7 +126,7 @@ pub struct DistanceSample {
     pub speed_mps: f32,
     pub throttle: f32,
     pub brake: f32,
-    /// ACC: steering-wheel degrees. Other games typically −1…1.
+    /// ACC: degrees on a ±100° scale (shared-memory input × 100). Other games typically −1…1.
     pub steering: f32,
     pub gear: f32,
     pub rpm: f32,

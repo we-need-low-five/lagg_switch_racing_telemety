@@ -15,6 +15,8 @@ const WIDTH = 420;
 const HEIGHT = 320;
 const PAD = 36;
 const POINT_STRIDE = 4;
+/** GT3 envelope is ~2.5G; shared-memory spikes (kerbs/resets) must not set the scale. */
+const MAX_PLAUSIBLE_G = 4;
 
 function themeCssVar(name: string, fallback: string): string {
   const value = getComputedStyle(document.documentElement)
@@ -73,6 +75,22 @@ export function TractionCircle({
     }> = [];
 
     for (const lap of lapsWithG) {
+      for (const s of lap.samples) {
+        const lat = s.g_force_x;
+        const long = s.g_force_z;
+        if (
+          lat == null ||
+          long == null ||
+          !Number.isFinite(lat) ||
+          !Number.isFinite(long)
+        ) {
+          continue;
+        }
+        const mag = Math.hypot(lat, long);
+        if (mag <= MAX_PLAUSIBLE_G) {
+          peak = Math.max(peak, mag);
+        }
+      }
       for (let i = 0; i < lap.samples.length; i += POINT_STRIDE) {
         const s = lap.samples[i];
         const lat = s.g_force_x;
@@ -85,8 +103,8 @@ export function TractionCircle({
         ) {
           continue;
         }
-        peak = Math.max(peak, Math.hypot(lat, long));
-        // Throttle → more opaque when on power; brake → when braking.
+        const mag = Math.hypot(lat, long);
+        if (mag > MAX_PLAUSIBLE_G) continue;
         const drive = Math.max(0, Math.min(1, s.throttle));
         const brake = Math.max(0, Math.min(1, s.brake));
         const opacity = 0.25 + 0.55 * Math.max(drive, brake);
@@ -120,12 +138,16 @@ export function TractionCircle({
         ) {
           continue;
         }
-        peak = Math.max(peak, Math.hypot(lat, long));
+        const mag = Math.hypot(lat, long);
+        if (mag <= MAX_PLAUSIBLE_G) {
+          peak = Math.max(peak, mag);
+        }
+        const scaleTo = mag > MAX_PLAUSIBLE_G ? MAX_PLAUSIBLE_G / mag : 1;
         cursorPts.push({
           key: `cursor-${lap.label}`,
           color: lap.color,
-          x: lat,
-          y: long,
+          x: lat * scaleTo,
+          y: long * scaleTo,
         });
       }
     }
@@ -157,9 +179,9 @@ export function TractionCircle({
   const grid = themeCssVar("--chart-grid", "hsl(250 9% 18%)");
 
   const toSvg = (lat: number, long: number) => ({
-    // SVG Y grows downward → flip long so accel (typically +z) plots upward.
     x: cx + lat * scale,
-    y: cy - long * scale,
+    // Brake (negative long G) plots upward.
+    y: cy + long * scale,
   });
 
   const ringRadii = [0.5, 1, 1.5, 2, 2.5, 3].filter((g) => g <= extent + 1e-6);
@@ -215,10 +237,10 @@ export function TractionCircle({
           Lat −
         </text>
         <text x={cx + 6} y={cy - inner / 2 + 12} fill={axis} fontSize={11}>
-          Accel
+          Brake
         </text>
         <text x={cx + 6} y={cy + inner / 2 - 4} fill={axis} fontSize={11}>
-          Brake
+          Accel
         </text>
         <text
           x={cx + inner / 2 - 4}

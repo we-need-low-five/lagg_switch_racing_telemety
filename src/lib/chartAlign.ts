@@ -54,7 +54,7 @@ export function interpolateSampleAtPct(
     throttle: lerp(a.throttle, b.throttle, t),
     brake: lerp(a.brake, b.brake, t),
     steering: lerp(a.steering, b.steering, t),
-    gear: Math.round(lerp(a.gear, b.gear, t)),
+    gear: t < 1 ? a.gear : b.gear,
     rpm: lerp(a.rpm, b.rpm, t),
     pos_x: lerp(a.pos_x, b.pos_x, t),
     pos_y: lerp(a.pos_y, b.pos_y, t),

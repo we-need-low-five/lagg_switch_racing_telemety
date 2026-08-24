@@ -1,4 +1,5 @@
 import type { DistanceSample, GameId } from "../types";
+import { holdGearThroughNeutral } from "./gear";
 import {
   fuelLitersToDisplay,
   pressurePsiToDisplay,
@@ -22,19 +23,21 @@ const HEADROOM = 0.08;
 /** Tyre temp/pressure: pad this fraction below min and above max. */
 const TYRE_PAD = 0.02;
 
-/** Lock used when older ACC/AC laps stored `steer_angle / 450`. */
+/** Lock used when AC/F1/LMU laps stored a −1…1 fraction of lock. */
 const LEGACY_STEER_LOCK_DEG = 450;
+/** ACC shared-memory input is ~−1…1; Motec-style degrees use ×100 (100 = full lock). */
+const ACC_STEER_INPUT_TO_DEG = 100;
+/** Raw ACC input never exceeds ~1; stored degrees are typically tens+. */
+const ACC_RAW_STEER_ABS_MAX = 2;
 
-export function accSteeringIsLegacyNormalized(
-  samples: DistanceSample[],
-): boolean {
+export function accSteeringIsRawInput(samples: DistanceSample[]): boolean {
   let maxAbs = 0;
   for (const sample of samples) {
     const v = Number(sample.steering);
     if (!Number.isFinite(v)) continue;
     maxAbs = Math.max(maxAbs, Math.abs(v));
   }
-  return maxAbs <= 1;
+  return maxAbs <= ACC_RAW_STEER_ABS_MAX;
 }
 
 export function steeringIsDegrees(game?: GameId | null): boolean {
@@ -42,20 +45,27 @@ export function steeringIsDegrees(game?: GameId | null): boolean {
 }
 
 /**
- * ACC stores wheel degrees. Older ACC laps (and AC/F1/LMU) used −1…1.
- * `|n| > 1` is already degrees and must not be scaled.
+ * ACC: shared-memory input × 100 → degrees (±100 at full lock).
+ * Laps already stored as degrees (`|n| > 2`) must not be scaled again.
+ * Other games: −1…1 lock fraction → L/R % via 450° lock.
+ * Sign is flipped so left is positive (chart mirrored through the X-axis).
  */
 export function steeringToDisplay(
   val: number,
   game?: GameId | null,
-  accLegacyNormalized = false,
+  accRawInput = false,
 ): number {
   const n = Number(val);
   if (!Number.isFinite(n)) return 0;
-  if (game === "acc") {
-    return accLegacyNormalized ? n * LEGACY_STEER_LOCK_DEG : n;
-  }
-  return Math.abs(n) <= 1 ? n * LEGACY_STEER_LOCK_DEG : n;
+  const scaled =
+    game === "acc"
+      ? accRawInput
+        ? n * ACC_STEER_INPUT_TO_DEG
+        : n
+      : Math.abs(n) <= 1
+        ? n * LEGACY_STEER_LOCK_DEG
+        : n;
+  return -scaled;
 }
 
 export function transformChannelValue(
@@ -63,7 +73,7 @@ export function transformChannelValue(
   raw: number,
   prefs: ChannelUnitPrefs,
   game?: GameId | null,
-  accLegacySteering = false,
+  accRawSteering = false,
 ): number {
   switch (key) {
     case "speed_mps":
@@ -72,7 +82,7 @@ export function transformChannelValue(
     case "brake":
       return raw * 100;
     case "steering":
-      return steeringToDisplay(raw, game, accLegacySteering);
+      return steeringToDisplay(raw, game, accRawSteering);
     case "fuel":
       return fuelLitersToDisplay(raw, prefs.fuelUnit);
     case "tyre_temp_fl":
@@ -98,10 +108,16 @@ export function collectDisplayValues(
 ): number[] {
   const values: number[] = [];
   for (const samples of sampleLists) {
-    const accLegacySteering =
+    if (channelKey === "gear") {
+      for (const g of holdGearThroughNeutral(samples.map((s) => Number(s.gear)))) {
+        if (Number.isFinite(g)) values.push(g);
+      }
+      continue;
+    }
+    const accRawSteering =
       channelKey === "steering" &&
       game === "acc" &&
-      accSteeringIsLegacyNormalized(samples);
+      accSteeringIsRawInput(samples);
     for (const sample of samples) {
       const raw = Number(sample[channelKey]);
       if (!Number.isFinite(raw)) continue;
@@ -111,7 +127,7 @@ export function collectDisplayValues(
           raw,
           prefs,
           game,
-          accLegacySteering,
+          accRawSteering,
         ),
       );
     }

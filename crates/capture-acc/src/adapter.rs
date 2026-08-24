@@ -561,8 +561,9 @@ impl GameAdapter for AccAdapter {
 
             brake: normalize_brake(physics.brake),
 
-            // ACC physics.steer_angle is steering-wheel degrees (crate docs).
-            steering: physics.steer_angle,
+            // ACC steer_angle is a ~−1…1 input, not wheel degrees. Scale so
+            // full lock is ±100° (Motec-style). Do not use a 450° lock.
+            steering: physics.steer_angle * 100.0,
 
             gear: physics.gear,
 

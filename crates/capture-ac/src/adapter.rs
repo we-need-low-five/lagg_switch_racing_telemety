@@ -149,7 +149,8 @@ impl GameAdapter for AcAdapter {
             speed_mps: kmh_to_mps(physics.speed_kmh),
             throttle: normalize_throttle(physics.gas),
             brake: normalize_brake(physics.brake),
-            // AC physics.steer_angle is wheel degrees; same 450° lock as ACC.
+            // AC physics.steer_angle is steering-wheel degrees; persist as
+            // fraction of 450° lock for L/R % charts.
             steering: normalize_steering(physics.steer_angle / 450.0),
             gear: physics.gear,
             rpm: physics.rpm as f32,
