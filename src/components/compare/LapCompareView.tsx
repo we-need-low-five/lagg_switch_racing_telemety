@@ -27,6 +27,11 @@ import {
   TYRE_TEMP_CHANNELS,
 } from "../../lib/accExtras";
 import { buildTimeDeltaSeries, applyCursorToPlot } from "../../lib/chartAlign";
+import {
+  collectDisplayValues,
+  yRangeForChannel,
+  type ChartYRange,
+} from "../../lib/chartYScale";
 import type { TrackLayout } from "../../lib/trackLayout";
 import {
   type CompareLapMeta,
@@ -39,7 +44,7 @@ import {
   getLapColor,
   usePreferences,
 } from "../../lib/preferences";
-import type { DistanceSample, DistanceSampleChannel } from "../../types";
+import type { DistanceSample, DistanceSampleChannel, GameId } from "../../types";
 import { formatLapTime } from "../../types";
 
 const CHANNEL_KEYS = [
@@ -67,6 +72,7 @@ export interface LapCompareViewProps {
   selectedIds: string[];
   referenceId: string | null;
   samples: Record<string, DistanceSample[]>;
+  game?: GameId | null;
   trackLayout: TrackLayout | null;
   layoutLoading: boolean;
   error?: string | null;
@@ -77,6 +83,7 @@ const TYRE_CHART_HEIGHT = 160;
 
 interface CompareChartsColumnProps {
   selectedIds: string[];
+  game?: GameId | null;
   deltaSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   chartSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   tyreSeriesByChannel: Record<
@@ -89,6 +96,11 @@ interface CompareChartsColumnProps {
   >;
   fuelUsedSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   fuelShowNoData: boolean;
+  scaleChartSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
+  scaleDeltaSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
+  scaleFuelUsedSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
+  tyreTempYRange: ChartYRange;
+  tyrePressYRange: ChartYRange;
   segmentZoom: boolean;
   chartCollapsed: Record<string, boolean>;
   chartHeights: Record<string, number>;
@@ -102,12 +114,18 @@ interface CompareChartsColumnProps {
 
 const CompareChartsColumn = memo(function CompareChartsColumn({
   selectedIds,
+  game,
   deltaSeries,
   chartSeries,
   tyreSeriesByChannel,
   tyreNoDataByChannel,
   fuelUsedSeries,
   fuelShowNoData,
+  scaleChartSeries,
+  scaleDeltaSeries,
+  scaleFuelUsedSeries,
+  tyreTempYRange,
+  tyrePressYRange,
   segmentZoom,
   chartCollapsed,
   chartHeights,
@@ -118,41 +136,53 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
   onPlotMount,
   onPlotUnmount,
 }: CompareChartsColumnProps) {
-  const renderTyreRow = (
+  const renderTyreGroup = (
+    groupKey: string,
     keys: readonly DistanceSampleChannel[],
     labels: Record<string, string>,
     sectionTitle: string,
+    yRange: ChartYRange,
   ) => (
-    <div className="compare-tyre-section">
-      <h3 className="compare-tyre-section-title">{sectionTitle}</h3>
-      <div className="compare-tyre-grid">
-        {keys.map((key) => (
-          <CollapsibleChart
-            key={key}
-            title={labels[key] ?? key}
-            collapsed={chartCollapsed[key] ?? false}
-            height={chartHeights[key] ?? TYRE_CHART_HEIGHT}
-            onToggle={() => onToggleChart(key)}
-            onResizeCommit={(h) => onChartResizeCommit(key, h)}
-          >
-            {(displayHeight) => (
-              <DistanceChart
-                title={labels[key] ?? key}
-                channelKey={key}
-                samplesByLap={tyreSeriesByChannel[key as keyof typeof tyreSeriesByChannel] ?? []}
-                showNoData={tyreNoDataByChannel[key as keyof typeof tyreNoDataByChannel] ?? false}
-                onCursorMove={onChartCursorMove}
-                onPlotMount={onPlotMount}
-                onPlotUnmount={onPlotUnmount}
-                segmentZoom={segmentZoom}
-                compact
-                height={displayHeight}
-              />
-            )}
-          </CollapsibleChart>
-        ))}
-      </div>
-    </div>
+    <CollapsibleChart
+      title={sectionTitle}
+      collapsed={chartCollapsed[groupKey] ?? false}
+      height={chartHeights[groupKey] ?? TYRE_CHART_HEIGHT}
+      onToggle={() => onToggleChart(groupKey)}
+      onResizeCommit={(h) => onChartResizeCommit(groupKey, h)}
+    >
+      {(displayHeight) => (
+        <div className="compare-tyre-grid">
+          <DistanceChart
+            title={"\u00a0"}
+            channelKey={keys[0]}
+            game={game}
+            samplesByLap={[]}
+            yRange={yRange}
+            compact
+            yAxisOnly
+            height={displayHeight}
+          />
+          {keys.map((key) => (
+            <DistanceChart
+              key={key}
+              title={labels[key] ?? key}
+              channelKey={key}
+              game={game}
+              samplesByLap={tyreSeriesByChannel[key as keyof typeof tyreSeriesByChannel] ?? []}
+              showNoData={tyreNoDataByChannel[key as keyof typeof tyreNoDataByChannel] ?? false}
+              yRange={yRange}
+              onCursorMove={onChartCursorMove}
+              onPlotMount={onPlotMount}
+              onPlotUnmount={onPlotUnmount}
+              segmentZoom={segmentZoom}
+              compact
+              hideYAxis
+              height={displayHeight}
+            />
+          ))}
+        </div>
+      )}
+    </CollapsibleChart>
   );
 
   return (
@@ -176,7 +206,9 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
             <DistanceChart
               title="Time Delta"
               channelKey="lap_time_s"
+              game={game}
               samplesByLap={deltaSeries}
+              scaleSamplesByLap={scaleDeltaSeries}
               onCursorMove={onChartCursorMove}
               onPlotMount={onPlotMount}
               onPlotUnmount={onPlotUnmount}
@@ -200,7 +232,9 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
             <DistanceChart
               title={CHANNEL_LABELS[key]}
               channelKey={key}
+              game={game}
               samplesByLap={chartSeries}
+              scaleSamplesByLap={scaleChartSeries}
               onCursorMove={onChartCursorMove}
               onPlotMount={onPlotMount}
               onPlotUnmount={onPlotUnmount}
@@ -211,8 +245,20 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
         </CollapsibleChart>
       ))}
 
-      {renderTyreRow(TYRE_TEMP_CHANNELS, TYRE_CORNER_LABELS, "Tyre core temps")}
-      {renderTyreRow(TYRE_PRESS_CHANNELS, TYRE_PRESS_LABELS, "Tyre pressures")}
+      {renderTyreGroup(
+        "tyre_temps",
+        TYRE_TEMP_CHANNELS,
+        TYRE_CORNER_LABELS,
+        "Tyre core temps",
+        tyreTempYRange,
+      )}
+      {renderTyreGroup(
+        "tyre_pressures",
+        TYRE_PRESS_CHANNELS,
+        TYRE_PRESS_LABELS,
+        "Tyre pressures",
+        tyrePressYRange,
+      )}
 
       <CollapsibleChart
         title="Fuel used (cumulative)"
@@ -225,7 +271,9 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
           <DistanceChart
             title="Fuel used (cumulative)"
             channelKey="fuel"
+            game={game}
             samplesByLap={fuelUsedSeries}
+            scaleSamplesByLap={scaleFuelUsedSeries}
             showNoData={fuelShowNoData}
             onCursorMove={onChartCursorMove}
             onPlotMount={onPlotMount}
@@ -245,6 +293,7 @@ export function LapCompareView({
   selectedIds,
   referenceId,
   samples,
+  game = null,
   trackLayout,
   layoutLoading,
   error,
@@ -442,6 +491,58 @@ export function LapCompareView({
     !metasWithSamples.some((meta) =>
       lapHasChannel(samples[meta.lapId] ?? [], "fuel"),
     );
+
+  const scaleDeltaSeries = useMemo(() => {
+    if (referenceSamples.length === 0 || metasWithSamples.length <= 1) return [];
+    return metasWithSamples
+      .filter((meta) => meta.lapId !== referenceId)
+      .map((meta) => ({
+        label: formatCompareDeltaLabel(meta, mode),
+        color: lapColorForId(meta.lapId),
+        samples: buildTimeDeltaSeries(
+          samples[meta.lapId] ?? [],
+          referenceSamples,
+        ),
+      }));
+  }, [
+    referenceSamples,
+    metasWithSamples,
+    referenceId,
+    samples,
+    mode,
+    lapColorForId,
+  ]);
+
+  const scaleFuelUsedSeries = useMemo(
+    () =>
+      metasWithSamples
+        .filter((meta) => lapHasChannel(samples[meta.lapId] ?? [], "fuel"))
+        .map((meta) => ({
+          label: formatCompareLapLabel(meta, mode),
+          color: lapColorForId(meta.lapId),
+          samples: buildFuelUsedSamples(samples[meta.lapId] ?? []),
+        })),
+    [metasWithSamples, samples, mode, lapColorForId],
+  );
+
+  const fullLapSampleLists = useMemo(
+    () => metasWithSamples.map((meta) => samples[meta.lapId] ?? []),
+    [metasWithSamples, samples],
+  );
+
+  const tyreTempYRange = useMemo(() => {
+    const values = TYRE_TEMP_CHANNELS.flatMap((key) =>
+      collectDisplayValues(fullLapSampleLists, key, prefs),
+    );
+    return yRangeForChannel("tyre_temp_fl", values);
+  }, [fullLapSampleLists, prefs.tempUnit]);
+
+  const tyrePressYRange = useMemo(() => {
+    const values = TYRE_PRESS_CHANNELS.flatMap((key) =>
+      collectDisplayValues(fullLapSampleLists, key, prefs),
+    );
+    return yRangeForChannel("tyre_press_fl", values);
+  }, [fullLapSampleLists, prefs.pressureUnit]);
 
   useEffect(() => {
     restoreChartsScroll();
@@ -655,12 +756,18 @@ export function LapCompareView({
 
           <CompareChartsColumn
             selectedIds={selectedIds}
+            game={game}
             deltaSeries={deltaSeries}
             chartSeries={chartSeries}
             tyreSeriesByChannel={tyreSeriesByChannel}
             tyreNoDataByChannel={tyreNoDataByChannel}
             fuelUsedSeries={fuelUsedSeries}
             fuelShowNoData={fuelShowNoData}
+            scaleChartSeries={fullChartSeries}
+            scaleDeltaSeries={scaleDeltaSeries}
+            scaleFuelUsedSeries={scaleFuelUsedSeries}
+            tyreTempYRange={tyreTempYRange}
+            tyrePressYRange={tyrePressYRange}
             segmentZoom={segmentZoom}
             chartCollapsed={prefs.layout.chartCollapsed}
             chartHeights={prefs.layout.chartHeights}

@@ -17,3 +17,4 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 sysinfo = "0.33"
+parking_lot = "0.12"

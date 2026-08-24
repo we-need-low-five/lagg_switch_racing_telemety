@@ -14,6 +14,7 @@ pub struct AcAdapter {
     session_announced: bool,
     sector_times: SectorTimes,
     last_sector_index: i32,
+    current_lap_in_pit: bool,
 }
 
 impl AcAdapter {
@@ -30,6 +31,7 @@ impl AcAdapter {
                 s3_ms: None,
             },
             last_sector_index: -1,
+            current_lap_in_pit: false,
         }
     }
 
@@ -90,10 +92,12 @@ impl GameAdapter for AcAdapter {
                 lap_time_ms,
             );
 
+            // AC has no is_valid_lap; invalidate if the car visited pit this lap.
+            let valid = lap_time_ms > 0 && !self.current_lap_in_pit;
             let summary = LapSummary {
                 lap_number: lap_number as u32,
                 lap_time_ms,
-                valid: lap_time_ms > 0,
+                valid,
                 sectors,
                 tyre_compound: None,
                 tc_level: None,
@@ -106,6 +110,7 @@ impl GameAdapter for AcAdapter {
                 s3_ms: None,
             };
             self.last_sector_index = -1;
+            self.current_lap_in_pit = false;
             self.last_completed_laps = graphics.completed_laps;
             return AdapterEvent::LapCompleted(summary);
         }
@@ -113,9 +118,14 @@ impl GameAdapter for AcAdapter {
         if self.last_completed_laps < 0 {
             self.last_completed_laps = graphics.completed_laps;
             self.last_sector_index = graphics.current_sector_index;
+            self.current_lap_in_pit = graphics.is_in_pit != 0;
             if graphics.completed_laps == 0 {
                 return AdapterEvent::LapStarted { lap_number: 1 };
             }
+        }
+
+        if graphics.is_in_pit != 0 {
+            self.current_lap_in_pit = true;
         }
 
         if graphics.current_sector_index != self.last_sector_index
@@ -139,25 +149,28 @@ impl GameAdapter for AcAdapter {
             speed_mps: kmh_to_mps(physics.speed_kmh),
             throttle: normalize_throttle(physics.gas),
             brake: normalize_brake(physics.brake),
+            // AC physics.steer_angle is wheel degrees; same 450° lock as ACC.
             steering: normalize_steering(physics.steer_angle / 450.0),
             gear: physics.gear,
             rpm: physics.rpm as f32,
-            pos_x: physics.velocity[0],
-            pos_y: physics.velocity[1],
-            pos_z: physics.velocity[2],
-            fuel: None,
-            tyre_temp_fl: None,
-            tyre_temp_fr: None,
-            tyre_temp_rl: None,
-            tyre_temp_rr: None,
-            tyre_press_fl: None,
-            tyre_press_fr: None,
-            tyre_press_rl: None,
-            tyre_press_rr: None,
+            // Original AC graphics has no carCoordinates (ACC-only). Leave
+            // world position at origin and resample from distance_traveled.
+            pos_x: 0.0,
+            pos_y: 0.0,
+            pos_z: 0.0,
+            fuel: Some(physics.fuel),
+            tyre_temp_fl: Some(physics.tyre_core_temperature[0]),
+            tyre_temp_fr: Some(physics.tyre_core_temperature[1]),
+            tyre_temp_rl: Some(physics.tyre_core_temperature[2]),
+            tyre_temp_rr: Some(physics.tyre_core_temperature[3]),
+            tyre_press_fl: Some(physics.wheels_pressure[0]),
+            tyre_press_fr: Some(physics.wheels_pressure[1]),
+            tyre_press_rl: Some(physics.wheels_pressure[2]),
+            tyre_press_rr: Some(physics.wheels_pressure[3]),
             raw: serde_json::json!({
                 "wheel_slip": physics.wheel_slip,
-                "tyre_core_temperature": physics.tyre_core_temperature,
-                "fuel": physics.fuel,
+                "velocity": physics.velocity,
+                "is_in_pit": graphics.is_in_pit,
             }),
         })
     }

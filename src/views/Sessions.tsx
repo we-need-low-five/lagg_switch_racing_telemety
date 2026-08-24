@@ -10,6 +10,8 @@ import {
   setRecordingPaused,
 } from "../api";
 import { OverflowMenu } from "../components/OverflowMenu";
+import { formatCarName } from "../lib/formatCarName";
+import { sessionBundleFileName } from "../lib/sessionBundleName";
 import type { RecordingStatus, SessionRecord } from "../types";
 import { formatLapTime, gameLabel } from "../types";
 
@@ -42,25 +44,35 @@ export function Sessions() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  async function handleExport(sessionId: string) {
-    const path = await save({
-      defaultPath: "session.stb",
-      filters: [{ name: "SimTelemetry Bundle", extensions: ["stb"] }],
-    });
-    if (!path) return;
-    await exportSessionBundle(sessionId, path);
-    await refresh();
+  async function handleExport(session: SessionRecord) {
+    try {
+      setError(null);
+      const path = await save({
+        defaultPath: sessionBundleFileName(session),
+        filters: [{ name: "SimTelemetry Bundle", extensions: ["stb"] }],
+      });
+      if (!path) return;
+      await exportSessionBundle(session.id, path);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function handleImport() {
-    const path = await open({
-      filters: [{ name: "SimTelemetry Bundle", extensions: ["stb"] }],
-      multiple: false,
-    });
-    if (!path || Array.isArray(path)) return;
-    const sessionId = await importSessionBundle(path);
-    await refresh();
-    navigate(`/sessions/${sessionId}`);
+    try {
+      setError(null);
+      const path = await open({
+        filters: [{ name: "SimTelemetry Bundle", extensions: ["stb"] }],
+        multiple: false,
+      });
+      if (!path || Array.isArray(path)) return;
+      const sessionId = await importSessionBundle(path);
+      await refresh();
+      navigate(`/sessions/${sessionId}`);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   async function handleDelete(sessionId: string) {
@@ -68,8 +80,13 @@ export function Sessions() {
       "Delete this session and all its lap data? This cannot be undone.",
     );
     if (!confirmed) return;
-    await deleteSession(sessionId);
-    await refresh();
+    try {
+      setError(null);
+      await deleteSession(sessionId);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   return (
@@ -110,8 +127,13 @@ export function Sessions() {
             type="button"
             className="secondary"
             onClick={async () => {
-              await setRecordingPaused(!status.paused);
-              await refresh();
+              try {
+                setError(null);
+                await setRecordingPaused(!status.paused);
+                await refresh();
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           >
             {status.paused ? "Resume" : "Pause"}
@@ -140,7 +162,7 @@ export function Sessions() {
               </span>
             </div>
             <h3>{session.track || "Unknown track"}</h3>
-            <p>{session.car}</p>
+            <p>{formatCarName(session.car)}</p>
             <div className="session-stats">
               <span>{session.lap_count} laps</span>
               <span>
@@ -161,7 +183,7 @@ export function Sessions() {
                 items={[
                   {
                     label: "Export",
-                    onClick: () => handleExport(session.id),
+                    onClick: () => handleExport(session),
                   },
                   {
                     label: "Delete",

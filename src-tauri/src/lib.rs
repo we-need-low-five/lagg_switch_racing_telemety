@@ -23,16 +23,19 @@ pub fn run() {
     std::fs::create_dir_all(data_dir.join("sessions")).ok();
     std::fs::create_dir_all(data_dir.join("logs")).ok();
 
-    let db = Database::open(&data_dir.join("simtelemetry.db")).expect("open database");
-    let recorder = RecordingService::new(db, data_dir.clone());
-    let state = Arc::new(Mutex::new(AppState::new(recorder, data_dir)));
+    let db = Arc::new(Mutex::new(
+        Database::open(&data_dir.join("simtelemetry.db")).expect("open database"),
+    ));
+    let recorder = RecordingService::new(db.clone(), data_dir.clone());
+    let state = Arc::new(AppState::new(db, recorder, data_dir));
 
     let recorder_state = state.clone();
     thread::spawn(move || {
         loop {
-            if let Some(mut guard) = recorder_state.try_lock() {
-                if let Ok(Some(msg)) = guard.recorder_mut().tick() {
-                    let _ = guard.set_last_notification(msg);
+            // Only the recorder mutex is needed for polling; DB is locked briefly inside flush.
+            if let Some(mut guard) = recorder_state.recorder.try_lock() {
+                if let Ok(Some(msg)) = guard.tick() {
+                    recorder_state.set_last_notification(msg);
                 }
             }
             thread::sleep(Duration::from_millis(8));
@@ -61,10 +64,10 @@ pub fn run() {
                         }
                     }
                     "pause" => {
-                        if let Some(state) = app.try_state::<Arc<Mutex<AppState>>>() {
-                            let mut guard = state.lock();
-                            let paused = !guard.recorder().is_paused();
-                            guard.recorder_mut().set_paused(paused);
+                        if let Some(state) = app.try_state::<Arc<AppState>>() {
+                            let mut guard = state.recorder.lock();
+                            let paused = !guard.is_paused();
+                            guard.set_paused(paused);
                         }
                     }
                     "quit" => {

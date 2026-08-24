@@ -61,11 +61,11 @@ fn interpolate_sample(
 
 fn linear_time_grid(samples: &[TelemetrySample]) -> Vec<DistanceSample> {
     let mut grid = Vec::with_capacity(DISTANCE_GRID_POINTS);
+    let last = samples.len() - 1;
     for point in 0..DISTANCE_GRID_POINTS {
-        let t_idx = (point as f32 / (DISTANCE_GRID_POINTS - 1) as f32) * (samples.len() - 1) as f32;
-        let idx = t_idx.floor() as usize;
-        let next = idx.min(samples.len() - 1);
-        let prev = idx.saturating_sub(0).min(next);
+        let t_idx = (point as f32 / (DISTANCE_GRID_POINTS - 1) as f32) * last as f32;
+        let prev = t_idx.floor() as usize;
+        let next = (prev + 1).min(last);
         let frac = t_idx - prev as f32;
         let a = &samples[prev];
         let b = &samples[next];

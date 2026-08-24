@@ -3,11 +3,69 @@ import {
   type AppearancePrefs,
   getPreferences,
 } from "./preferences";
+import paletteRecipe from "./palette-recipe.json";
+
+type Hsl = { h: number; s: number; l: number };
+
+type SlotDelta = {
+  dH: number;
+  dS: number;
+  dL: number;
+};
+
+type AdaptedSlot = {
+  hex: string;
+  clamped: boolean;
+};
+
+type TransferMode = "all" | "hue-only";
+
+const RECIPE = {
+  colors: paletteRecipe.colors,
+  seedIndex: paletteRecipe.seedIndex,
+  mode: paletteRecipe.mode as TransferMode,
+  flags: paletteRecipe.flags,
+};
+
+const HEX6 = /^#([0-9a-fA-F]{6})$/;
+const HEX3 = /^#([0-9a-fA-F]{3})$/;
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
+function wrapHue(h: number): number {
+  return ((h % 360) + 360) % 360;
+}
+
+/** Signed shortest-arc hue delta in (−180, 180]. */
+function signedHueDelta(from: number, to: number): number {
+  let d = ((to - from) % 360 + 360) % 360;
+  if (d > 180) d -= 360;
+  return round1(d);
+}
+
+function parseHex(input: string): string | null {
+  const trimmed = input.trim();
+  const withHash = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+  const short = HEX3.exec(withHash);
+  if (short) {
+    const [r, g, b] = short[1];
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  const full = HEX6.exec(withHash);
+  if (full) return `#${full[1]}`.toLowerCase();
+  return null;
+}
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const cleaned = hex.replace("#", "");
-  if (cleaned.length !== 6) return null;
-  const n = parseInt(cleaned, 16);
+  const normalized = parseHex(hex);
+  if (!normalized) return null;
+  const n = parseInt(normalized.slice(1), 16);
   return {
     r: (n >> 16) & 255,
     g: (n >> 8) & 255,
@@ -15,7 +73,13 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
   };
 }
 
-function hexToHsl(hex: string): { h: number; s: number; l: number } | null {
+function rgbToHex(r: number, g: number, b: number): string {
+  const to = (c: number) =>
+    clamp(Math.round(c), 0, 255).toString(16).padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+function hexToHsl(hex: string): Hsl | null {
   const rgb = hexToRgb(hex);
   if (!rgb) return null;
 
@@ -47,18 +111,137 @@ function hexToHsl(hex: string): { h: number; s: number; l: number } | null {
   return { h: h * 360, s: s * 100, l: l * 100 };
 }
 
-function wrapHue(h: number): number {
-  return ((h % 360) + 360) % 360;
+function hueToRgb(p: number, q: number, t: number): number {
+  let x = t;
+  if (x < 0) x += 1;
+  if (x > 1) x -= 1;
+  if (x < 1 / 6) return p + (q - p) * 6 * x;
+  if (x < 1 / 2) return q;
+  if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+  return p;
 }
 
-/** hsl(h, s%, l%) — modern space-separated syntax for alpha mixes */
+function hslToHex(hsl: Hsl): string {
+  const h = wrapHue(hsl.h) / 360;
+  const s = clamp(hsl.s, 0, 100) / 100;
+  const l = clamp(hsl.l, 0, 100) / 100;
+  let r: number;
+  let g: number;
+  let b: number;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hueToRgb(p, q, h + 1 / 3);
+    g = hueToRgb(p, q, h);
+    b = hueToRgb(p, q, h - 1 / 3);
+  }
+  return rgbToHex(r * 255, g * 255, b * 255);
+}
+
+function extractRecipe(colors: string[], seedIndex: number): SlotDelta[] {
+  const seed = hexToHsl(colors[seedIndex]);
+  if (!seed) return colors.map(() => ({ dH: 0, dS: 0, dL: 0 }));
+  return colors.map((hex, i) => {
+    if (i === seedIndex) return { dH: 0, dS: 0, dL: 0 };
+    const hsl = hexToHsl(hex);
+    if (!hsl) return { dH: 0, dS: 0, dL: 0 };
+    return {
+      dH: signedHueDelta(seed.h, hsl.h),
+      dS: round1(hsl.s - seed.s),
+      dL: round1(hsl.l - seed.l),
+    };
+  });
+}
+
+function applyDeltaToHex(seedHex: string, delta: SlotDelta): AdaptedSlot {
+  const seed = hexToHsl(seedHex);
+  if (!seed) return { hex: seedHex, clamped: false };
+  const sRaw = seed.s + delta.dS;
+  const lRaw = seed.l + delta.dL;
+  const s = clamp(sRaw, 0, 100);
+  const l = clamp(lRaw, 0, 100);
+  return {
+    hex: hslToHex({ h: wrapHue(seed.h + delta.dH), s, l }),
+    clamped: s !== sRaw || l !== lRaw,
+  };
+}
+
+function adaptPalette(
+  colors: string[],
+  seedIndex: number,
+  newSeed: string,
+  mode: TransferMode,
+  recipe: SlotDelta[],
+): AdaptedSlot[] {
+  return colors.map((hex, i) => {
+    if (i === seedIndex) return { hex: newSeed, clamped: false };
+    const delta = recipe[i] ?? { dH: 0, dS: 0, dL: 0 };
+    if (mode === "hue-only") {
+      const orig = hexToHsl(hex);
+      const next = hexToHsl(newSeed);
+      if (!orig || !next) return { hex, clamped: false };
+      return {
+        hex: hslToHex({ h: wrapHue(next.h + delta.dH), s: orig.s, l: orig.l }),
+        clamped: false,
+      };
+    }
+    return applyDeltaToHex(newSeed, delta);
+  });
+}
+
+function hasFlag(flags: string[][], name: string): boolean {
+  return flags.some((list) => list.includes(name));
+}
+
+function slotHex(
+  adapted: AdaptedSlot[],
+  flags: string[][],
+  names: string[],
+  fallbackIndex: number,
+): string {
+  for (const name of names) {
+    const index = flags.findIndex((list) => list.includes(name));
+    if (index >= 0 && adapted[index]) return adapted[index].hex;
+  }
+  const i = Math.min(Math.max(fallbackIndex, 0), adapted.length - 1);
+  return adapted[i].hex;
+}
+
+function fillIsDark(hex: string): boolean {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return true;
+  const y = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+  return y <= 0.55;
+}
+
+/** hsl(h s% l%) — modern space-separated syntax for alpha mixes */
 export function themeHsl(h: number, s: number, l: number, alpha?: number): string {
-  const base = `hsl(${wrapHue(h)} ${s}% ${l}%`;
+  const base = `hsl(${round1(wrapHue(h))} ${round1(clamp(s, 0, 100))}% ${round1(clamp(l, 0, 100))}%`;
   return alpha == null ? `${base})` : `${base} / ${alpha})`;
+}
+
+function layered(
+  hex: string,
+  ds: number,
+  dl: number,
+  towardLight: boolean,
+): string {
+  const hsl = hexToHsl(hex);
+  if (!hsl) return hex;
+  const dir = towardLight ? 1 : -1;
+  return themeHsl(hsl.h, hsl.s + ds, hsl.l + dir * dl);
+}
+
+function tintedText(seedHex: string, s: number, l: number): string {
+  const hsl = hexToHsl(seedHex);
+  return themeHsl(hsl?.h ?? 275, s, l);
 }
 
 export interface ThemePalette {
   h: number;
+  scheme: "dark" | "light";
   bgBase: string;
   bgSurface: string;
   bgSurfaceElevated: string;
@@ -80,46 +263,87 @@ export interface ThemePalette {
   scrollbarTrack: string;
 }
 
-const PANEL_HUE_FACTOR = 1.136;
-const CONTROL_HUE_FACTOR = 1.207;
+const RECIPE_DELTAS = extractRecipe(RECIPE.colors, RECIPE.seedIndex);
 
-function panelHue(h: number): number {
-  return wrapHue(h * PANEL_HUE_FACTOR);
-}
+/**
+ * Retint the stored palette recipe onto `seedHex`.
+ * Mode `all` applies ΔH/ΔS/ΔL from the recipe seed; `hue-only` keeps each
+ * slot's original S/L and only transfers hue. Flagged slots map onto UI
+ * tokens; remaining chrome (hover, borders, text) is derived from those fills.
+ */
+export function buildThemePalette(seedHex: string): ThemePalette {
+  const seed =
+    parseHex(seedHex) ?? parseHex(RECIPE.colors[RECIPE.seedIndex]) ?? "#221c26";
+  const adapted = adaptPalette(
+    RECIPE.colors,
+    RECIPE.seedIndex,
+    seed,
+    RECIPE.mode,
+    RECIPE_DELTAS,
+  );
+  const last = adapted.length - 1;
+  const { flags } = RECIPE;
 
-function controlHue(h: number): number {
-  return wrapHue(h * CONTROL_HUE_FACTOR);
-}
+  const bgBase = slotHex(adapted, flags, ["--background"], RECIPE.seedIndex);
+  const bgSurface = slotHex(adapted, flags, ["--card"], Math.min(1, last));
+  const bgControl = slotHex(
+    adapted,
+    flags,
+    ["--primary", "--secondary", "--accent"],
+    Math.min(2, last),
+  );
+  const accent = slotHex(
+    adapted,
+    flags,
+    ["--accent", "--primary", "--secondary"],
+    Math.min(2, last),
+  );
 
-/** Palette: background h,39,7 · panels h×1.136,9,12 · controls h×1.207,15,15 */
-export function buildThemePalette(h: number): ThemePalette {
-  const panelH = panelHue(h);
-  const controlH = controlHue(h);
-  const bgBase = themeHsl(h, 39, 7);
-  const bgSurface = themeHsl(panelH, 9, 12);
-  const bgControl = themeHsl(controlH, 15, 15);
+  const dark = fillIsDark(bgBase);
+  const controlDark = fillIsDark(bgControl);
+  const seedHsl = hexToHsl(bgBase);
+  const accentHsl = hexToHsl(accent);
+  const towardLight = dark;
+
+  const textPrimary = hasFlag(flags, "--foreground")
+    ? slotHex(adapted, flags, ["--foreground"], RECIPE.seedIndex)
+    : tintedText(bgBase, 20, dark ? 92 : 12);
+  const textMuted = hasFlag(flags, "--muted")
+    ? slotHex(adapted, flags, ["--muted"], RECIPE.seedIndex)
+    : tintedText(bgBase, 12, dark ? 62 : 42);
+  const borderColor = hasFlag(flags, "--border")
+    ? slotHex(adapted, flags, ["--border"], Math.min(1, last))
+    : layered(bgSurface, 0, 10, towardLight);
+  const linkColor = hasFlag(flags, "--link")
+    ? slotHex(adapted, flags, ["--link"], Math.min(2, last))
+    : themeHsl(
+        accentHsl?.h ?? seedHsl?.h ?? 275,
+        Math.max(accentHsl?.s ?? 15, 50),
+        dark ? 68 : 38,
+      );
 
   return {
-    h: wrapHue(h),
+    h: round1(wrapHue(seedHsl?.h ?? 275)),
+    scheme: dark ? "dark" : "light",
     bgBase,
     bgSurface,
-    bgSurfaceElevated: themeHsl(panelH, 11, 14),
+    bgSurfaceElevated: layered(bgSurface, 2, 2, towardLight),
     bgControl,
-    accent: bgControl,
-    accentHover: themeHsl(controlH, 18, 22),
-    accentActive: themeHsl(controlH, 35, 30),
-    borderColor: themeHsl(panelH, 9, 22),
-    borderControl: themeHsl(controlH, 15, 28),
-    textPrimary: themeHsl(h, 20, 92),
-    textMuted: themeHsl(h, 12, 62),
-    textSecondary: themeHsl(h, 15, 78),
-    textOnControl: themeHsl(h, 25, 95),
-    linkColor: themeHsl(controlH, 50, 68),
-    overlayBackdrop: themeHsl(h, 39, 7, 0.72),
-    chartGrid: themeHsl(panelH, 9, 18),
-    chartAxis: themeHsl(h, 12, 62),
-    scrollbarThumb: themeHsl(controlH, 15, 25),
-    scrollbarTrack: themeHsl(panelH, 9, 10),
+    accent,
+    accentHover: layered(accent, 3, 7, towardLight),
+    accentActive: layered(accent, 20, 15, towardLight),
+    borderColor,
+    borderControl: layered(bgControl, 0, 13, towardLight),
+    textPrimary,
+    textMuted,
+    textSecondary: tintedText(bgBase, 15, dark ? 78 : 28),
+    textOnControl: tintedText(bgControl, 25, controlDark ? 95 : 12),
+    linkColor,
+    overlayBackdrop: `color-mix(in srgb, ${bgBase} 72%, transparent)`,
+    chartGrid: layered(bgSurface, 0, 6, towardLight),
+    chartAxis: textMuted,
+    scrollbarThumb: layered(bgControl, 0, 10, towardLight),
+    scrollbarTrack: layered(bgSurface, 0, -2, towardLight),
   };
 }
 
@@ -133,12 +357,12 @@ export function resolveBackgroundBase(appearance: AppearancePrefs): string {
 export function hueFromAppearance(appearance: AppearancePrefs): number {
   const base = resolveBackgroundBase(appearance);
   const hsl = hexToHsl(base);
-  return hsl?.h ?? 220;
+  return hsl?.h ?? 275;
 }
 
 export function applyTheme(appearance?: AppearancePrefs): void {
   const prefs = appearance ?? getPreferences().appearance;
-  const palette = buildThemePalette(hueFromAppearance(prefs));
+  const palette = buildThemePalette(resolveBackgroundBase(prefs));
   const root = document.documentElement;
 
   root.style.setProperty("--theme-h", String(palette.h));
@@ -167,8 +391,8 @@ export function applyTheme(appearance?: AppearancePrefs): void {
   root.style.setProperty("--track-map-cursor-fill", palette.textOnControl);
   root.style.setProperty("--track-map-cursor-stroke", palette.linkColor);
 
-  root.dataset.theme = "dark";
-  root.style.colorScheme = "dark";
+  root.dataset.theme = palette.scheme;
+  root.style.colorScheme = palette.scheme;
 
   document.body.style.background = palette.bgBase;
 }

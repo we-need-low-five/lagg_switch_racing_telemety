@@ -18,6 +18,11 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).context("open sqlite database")?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;",
+        )?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -167,6 +172,26 @@ impl Database {
         channel_manifest_json: &str,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
+        self.insert_lap_with_id(
+            id,
+            session_id,
+            summary,
+            parquet_path,
+            sample_rate_hz,
+            channel_manifest_json,
+        )?;
+        Ok(id)
+    }
+
+    pub fn insert_lap_with_id(
+        &self,
+        id: Uuid,
+        session_id: Uuid,
+        summary: &LapSummary,
+        parquet_path: &str,
+        sample_rate_hz: f32,
+        channel_manifest_json: &str,
+    ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
         self.conn.execute(
             "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10)",
@@ -193,7 +218,7 @@ impl Database {
             ],
         )?;
         self.refresh_best_lap(session_id)?;
-        Ok(id)
+        Ok(())
     }
 
     pub fn refresh_best_lap(&self, session_id: Uuid) -> Result<()> {
@@ -307,7 +332,7 @@ impl Database {
         &self.conn
     }
 
-    pub fn delete_session(&self, session_id: Uuid) -> Result<()> {
+    pub fn delete_session(&self, session_id: Uuid, data_dir: &Path) -> Result<()> {
         self.conn.execute(
             "DELETE FROM lap_files WHERE lap_id IN (SELECT id FROM laps WHERE session_id = ?1)",
             params![session_id.to_string()],
@@ -320,14 +345,48 @@ impl Database {
             "DELETE FROM sessions WHERE id = ?1",
             params![session_id.to_string()],
         )?;
+        let session_dir = data_dir.join("sessions").join(session_id.to_string());
+        if session_dir.exists() {
+            std::fs::remove_dir_all(&session_dir).with_context(|| {
+                format!("remove session directory {}", session_dir.display())
+            })?;
+        }
         Ok(())
     }
 
     pub fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
-        Ok(self
-            .list_sessions()?
-            .into_iter()
-            .find(|s| s.id == session_id))
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name,
+                    (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
+                    (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
+             FROM sessions s WHERE s.id = ?1",
+        )?;
+        let mut rows = stmt.query(params![session_id.to_string()])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let game: String = row.get(1)?;
+        let started_at: String = row.get(5)?;
+        let ended_at: Option<String> = row.get(6)?;
+        Ok(Some(SessionRecord {
+            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+            game: serde_json::from_str(&game).unwrap_or(GameId::Acc),
+            track_id: row.get(2)?,
+            track: row.get(3)?,
+            car: row.get(4)?,
+            started_at: DateTime::parse_from_rfc3339(&started_at)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            ended_at: ended_at.and_then(|v| {
+                DateTime::parse_from_rfc3339(&v)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
+            game_version: row.get(7)?,
+            player_name: row.get(8)?,
+            lap_count: row.get(9)?,
+            best_lap_time_ms: row.get(10)?,
+        }))
     }
 
     pub fn list_leaderboard_games(&self) -> Result<Vec<GameId>> {

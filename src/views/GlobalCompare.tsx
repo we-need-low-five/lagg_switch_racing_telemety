@@ -263,6 +263,7 @@ export function GlobalCompare() {
         selectedIds={compareIds}
         referenceId={referenceId}
         samples={samples}
+        game={selectedGame || null}
         trackLayout={trackLayout}
         layoutLoading={layoutLoading}
         error={error}

@@ -12,7 +12,7 @@ use sim_capture_common::SharedMemoryMapping;
 
 use sim_core::{
 
-    kmh_to_mps, normalize_brake, normalize_steering, normalize_throttle, AdapterEvent,
+    kmh_to_mps, normalize_brake, normalize_throttle, AdapterEvent,
 
     GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, TelemetrySample,
 
@@ -561,7 +561,8 @@ impl GameAdapter for AccAdapter {
 
             brake: normalize_brake(physics.brake),
 
-            steering: normalize_steering(physics.steer_angle / 450.0),
+            // ACC physics.steer_angle is steering-wheel degrees (crate docs).
+            steering: physics.steer_angle,
 
             gear: physics.gear,
 

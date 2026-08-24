@@ -219,7 +219,7 @@ export function fuelUnitLabel(unit: FuelUnit): string {
 export function formatFuelLiters(l: number | null | undefined, unit: FuelUnit): string {
   if (l == null || !Number.isFinite(l)) return "—";
   const value = fuelLitersToDisplay(l, unit);
-  return unit === "us_gal" ? value.toFixed(2) : value.toFixed(1);
+  return value.toFixed(2);
 }
 
 export function tempCToDisplay(c: number, unit: TempUnit): number {

@@ -3,7 +3,11 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { getSession, listLaps } from "../api";
 import { displaySectorTimes } from "../lib/compareLaps";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
-import { formatFuelLiters, usePreferences } from "../lib/preferences";
+import {
+  formatFuelLiters,
+  fuelUnitLabel,
+  usePreferences,
+} from "../lib/preferences";
 import type { LapRecord, SessionRecord } from "../types";
 import { formatLapTime, gameLabel } from "../types";
 
@@ -163,6 +167,19 @@ export function SessionReview() {
                   {lapStats.validLapCount > 0
                     ? `${lapStats.validLapCount} valid lap${lapStats.validLapCount === 1 ? "" : "s"}`
                     : "No valid laps"}
+                </span>
+              </div>
+              <div className="review-summary-card">
+                <span className="review-summary-label">Average fuel</span>
+                <span className="review-summary-value">
+                  {lapStats.averageFuelL != null
+                    ? `${formatFuelLiters(lapStats.averageFuelL, prefs.fuelUnit)} ${fuelUnitLabel(prefs.fuelUnit)}`
+                    : "—"}
+                </span>
+                <span className="review-summary-meta muted">
+                  {lapStats.averageFuelLapCount > 0
+                    ? `${lapStats.averageFuelLapCount} valid lap${lapStats.averageFuelLapCount === 1 ? "" : "s"}`
+                    : "No fuel data"}
                 </span>
               </div>
             </div>

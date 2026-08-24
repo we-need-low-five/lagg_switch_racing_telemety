@@ -2,18 +2,22 @@ import uPlot, { type AlignedData, type Options } from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { useEffect, useRef } from "react";
 import {
-  fuelLitersToDisplay,
   fuelUnitLabel,
-  pressurePsiToDisplay,
   pressureUnitLabel,
-  speedMpsToDisplay,
   speedUnitLabel,
-  tempCToDisplay,
   tempUnitLabel,
   usePreferences,
 } from "../../lib/preferences";
 import { alignLapSamples } from "../../lib/chartAlign";
-import type { DistanceSample } from "../../types";
+import {
+  accSteeringIsLegacyNormalized,
+  collectDisplayValues,
+  steeringIsDegrees,
+  transformChannelValue,
+  yRangeForChannel,
+  type ChartYRange,
+} from "../../lib/chartYScale";
+import type { DistanceSample, GameId } from "../../types";
 
 export interface SeriesConfig {
   key: keyof DistanceSample;
@@ -24,6 +28,7 @@ export interface SeriesConfig {
 interface DistanceChartProps {
   title: string;
   channelKey: keyof DistanceSample;
+  game?: GameId | null;
   samplesByLap: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   onCursorMove?: (pct: number | null) => void;
   onPlotMount?: (plot: uPlot) => void;
@@ -31,52 +36,33 @@ interface DistanceChartProps {
   height?: number;
   segmentZoom?: boolean;
   compact?: boolean;
+  /** Hide Y ticks, values, and axis title (grid stays). Used for grouped tyre plots. */
+  hideYAxis?: boolean;
+  /** Shared group scale only: ticks/label, no series. */
+  yAxisOnly?: boolean;
   showNoData?: boolean;
   valueSelector?: (sample: DistanceSample) => number | null | undefined;
+  /** Full-lap (or other) samples used to lock Y domain; defaults to `samplesByLap`. */
+  scaleSamplesByLap?: Array<{ samples: DistanceSample[] }>;
+  /** Overrides computed channel domain (e.g. shared tyre-grid scale). */
+  yRange?: ChartYRange;
 }
 
-function transformValue(
-  key: keyof DistanceSample,
-  raw: number,
-  prefs: ReturnType<typeof usePreferences>[0],
-): number {
-  switch (key) {
-    case "speed_mps":
-      return speedMpsToDisplay(raw, prefs.speedUnit);
-    case "throttle":
-    case "brake":
-      return raw * 100;
-    case "steering":
-      return steeringToPercent(raw);
-    case "fuel":
-      return fuelLitersToDisplay(raw, prefs.fuelUnit);
-    case "tyre_temp_fl":
-    case "tyre_temp_fr":
-    case "tyre_temp_rl":
-    case "tyre_temp_rr":
-      return tempCToDisplay(raw, prefs.tempUnit);
-    case "tyre_press_fl":
-    case "tyre_press_fr":
-    case "tyre_press_rl":
-    case "tyre_press_rr":
-      return pressurePsiToDisplay(raw, prefs.pressureUnit);
-    case "lap_time_s":
-      return raw;
-    default:
-      return raw;
-  }
-}
-
-function steeringToPercent(val: number): number {
-  const n = Number(val);
-  if (!Number.isFinite(n)) return 0;
-  return Math.abs(n) <= 1 ? n * 100 : n;
+function usesTwoDecimalFormat(key: keyof DistanceSample): boolean {
+  return (
+    key === "fuel" ||
+    key === "tyre_press_fl" ||
+    key === "tyre_press_fr" ||
+    key === "tyre_press_rl" ||
+    key === "tyre_press_rr"
+  );
 }
 
 function formatYTick(
   key: keyof DistanceSample,
   val: number,
   deltaUnit: "s" | "ms",
+  game?: GameId | null,
 ): string {
   if (key === "lap_time_s") {
     if (deltaUnit === "ms") {
@@ -85,20 +71,26 @@ function formatYTick(
     return val.toFixed(2);
   }
   if (key === "steering") {
-    const rounded = Math.round(steeringToPercent(val));
-    if (rounded === 0) return "0";
-    return String(rounded);
+    return formatSteeringReadout(val, game);
   }
   if (key === "gear" || key === "rpm") {
     return String(Math.round(val));
   }
+  if (usesTwoDecimalFormat(key)) {
+    return val.toFixed(2);
+  }
   return String(Math.round(val));
 }
 
-function formatSteeringLegendBody(val: number | null): string {
-  if (val == null) return "";
-  const signedPct = steeringToPercent(val);
-  const rounded = Math.round(signedPct);
+function formatSteeringReadout(
+  val: number | null,
+  game?: GameId | null,
+): string {
+  if (val == null || !Number.isFinite(val)) return "";
+  const rounded = Math.round(val);
+  if (steeringIsDegrees(game)) {
+    return `${rounded}°`;
+  }
   if (rounded === 0) return "0%";
   const pct = Math.abs(rounded);
   return rounded < 0 ? `L ${pct}%` : `R ${pct}%`;
@@ -109,14 +101,18 @@ function formatLegendValueBody(
   val: number | null,
   dataIdx: number | null | undefined,
   deltaUnit: "s" | "ms",
+  game?: GameId | null,
 ): string {
   if (dataIdx == null) return "--";
   if (val == null) return "";
   if (key === "steering") {
-    return formatSteeringLegendBody(val);
+    return formatSteeringReadout(val, game);
   }
   if (key === "lap_time_s") {
     return formatYTick(key, val, deltaUnit);
+  }
+  if (usesTwoDecimalFormat(key)) {
+    return val.toFixed(2);
   }
   return String(Math.round(val));
 }
@@ -161,8 +157,9 @@ function formatLegendValueWithSuffix(
   val: number | null,
   dataIdx: number | null | undefined,
   prefs: ReturnType<typeof usePreferences>[0],
+  game?: GameId | null,
 ): string {
-  const body = formatLegendValueBody(key, val, dataIdx, prefs.deltaUnit);
+  const body = formatLegendValueBody(key, val, dataIdx, prefs.deltaUnit, game);
   if (body === "--") return "--";
   if (body === "") return "";
   const suffix = legendValueSuffix(key, prefs);
@@ -173,6 +170,7 @@ function formatLegendValueWithSuffix(
 function yAxisLabel(
   key: keyof DistanceSample,
   prefs: ReturnType<typeof usePreferences>[0],
+  game?: GameId | null,
 ): string {
   switch (key) {
     case "speed_mps":
@@ -182,7 +180,7 @@ function yAxisLabel(
     case "brake":
       return "Brake (%)";
     case "steering":
-      return "Steering (L/R %)";
+      return steeringIsDegrees(game) ? "Steering (°)" : "Steering (L/R %)";
     case "gear":
       return "Gear";
     case "rpm":
@@ -238,6 +236,7 @@ function hideLegendDistanceRow(u: uPlot): void {
 export function DistanceChart({
   title,
   channelKey,
+  game = null,
   samplesByLap,
   onCursorMove,
   onPlotMount,
@@ -245,8 +244,12 @@ export function DistanceChart({
   height = 280,
   segmentZoom = false,
   compact = false,
+  hideYAxis = false,
+  yAxisOnly = false,
   showNoData = false,
   valueSelector,
+  scaleSamplesByLap,
+  yRange,
 }: DistanceChartProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -264,8 +267,19 @@ export function DistanceChart({
   onPlotUnmountRef.current = onPlotUnmount;
 
   useEffect(() => {
-    if (!rootRef.current || samplesByLap.length === 0 || showNoData) return;
+    if (!rootRef.current || showNoData) return;
+    if (!yAxisOnly && samplesByLap.length === 0) return;
 
+    let data: AlignedData;
+    const series: Options["series"] = [{}];
+
+    if (yAxisOnly) {
+      data = [
+        [0, 100],
+        [0, 1],
+      ];
+      series.push({ show: false });
+    } else {
     const { x, aligned } = alignLapSamples(samplesByLap.map((lap) => lap.samples));
     if (x.length === 0) {
       if (plotRef.current) {
@@ -276,19 +290,29 @@ export function DistanceChart({
       return;
     }
 
-    const data: AlignedData = [x];
-    const series: Options["series"] = [{}];
+    data = [x];
 
     for (let i = 0; i < samplesByLap.length; i += 1) {
       const lap = samplesByLap[i];
       const alignedSamples = aligned[i];
       if (alignedSamples.length !== x.length) continue;
 
+      const accLegacySteering =
+        channelKey === "steering" &&
+        game === "acc" &&
+        accSteeringIsLegacyNormalized(alignedSamples);
+
       data.push(
         alignedSamples.map((s) => {
           const raw = valueSelector ? valueSelector(s) : Number(s[channelKey]);
           if (raw == null || !Number.isFinite(raw)) return null;
-          return transformValue(channelKey, raw, prefsRef.current);
+          return transformChannelValue(
+            channelKey,
+            raw,
+            prefsRef.current,
+            game,
+            accLegacySteering,
+          );
         }),
       );
       series.push({
@@ -308,37 +332,43 @@ export function DistanceChart({
             val,
             dataIdx,
             prefsRef.current,
+            game,
           ),
       });
     }
 
-    if (data.length < 2) {
-      if (plotRef.current) {
-        onPlotUnmountRef.current?.(plotRef.current);
-        plotRef.current.destroy();
-        plotRef.current = null;
+      if (data.length < 2) {
+        if (plotRef.current) {
+          onPlotUnmountRef.current?.(plotRef.current);
+          plotRef.current.destroy();
+          plotRef.current = null;
+        }
+        return;
       }
-      return;
     }
 
-    const yLabel = yAxisLabel(channelKey, prefsRef.current);
+    const yLabel = yAxisLabel(channelKey, prefsRef.current, game);
     const axisColor = getChartAxisColor();
     const gridColor = getChartGridColor();
     const hideXAxis = segmentZoom || compact;
+    const showYAxis = yAxisOnly || !hideYAxis;
 
-    const ySeries = data.slice(1) as number[][];
-    const yFlat = ySeries.flat().filter((v) => Number.isFinite(v));
-    const yMin = yFlat.length ? Math.min(...yFlat) : 0;
-    const yMax = yFlat.length ? Math.max(...yFlat) : 0;
-    const yTickSamples = [yMin, (yMin + yMax) / 2, yMax];
-    const yTickStrings = yTickSamples.map((v) =>
-      formatYTick(
-        channelKey,
-        channelKey === "steering" ? steeringToPercent(v) : v,
-        prefsRef.current.deltaUnit,
-      ),
+    const scaleLists = (scaleSamplesByLap ?? samplesByLap).map(
+      (lap) => lap.samples,
     );
-    const yAxisSize = yAxisTickBandWidth(yTickStrings);
+    const domain =
+      yRange ??
+      yRangeForChannel(
+        channelKey,
+        collectDisplayValues(
+          scaleLists,
+          channelKey,
+          prefsRef.current,
+          game,
+        ),
+      );
+    const yMin = domain.min;
+    const yMax = domain.max;
     const plotHeight = heightRef.current;
 
     const opts: Options = {
@@ -349,15 +379,18 @@ export function DistanceChart({
       series,
       scales: {
         x: { time: false },
-        y: { auto: true },
+        y: {
+          auto: false,
+          range: () => [yMin, yMax],
+        },
       },
       axes: [
         {
           stroke: axisColor,
-          grid: { stroke: gridColor },
-          label: hideXAxis ? "" : "Distance",
-          labelSize: hideXAxis ? 0 : 28,
-          labelGap: hideXAxis ? 0 : 6,
+          grid: { show: !yAxisOnly, stroke: gridColor },
+          label: "",
+          labelSize: 0,
+          labelGap: 0,
           size: compact ? 36 : 50,
           ticks: { show: !hideXAxis },
           values: (_u, vals) =>
@@ -367,56 +400,65 @@ export function DistanceChart({
         },
         {
           stroke: axisColor,
-          grid: { stroke: gridColor },
-          label: yLabel,
-          labelSize: 32,
-          labelGap: 8,
-          gap: 10,
-          size: yAxisSize,
+          grid: { show: !yAxisOnly, stroke: gridColor },
+          label: showYAxis ? yLabel : "",
+          labelSize: showYAxis ? 32 : 0,
+          labelGap: showYAxis ? 8 : 0,
+          gap: showYAxis ? 10 : 0,
+          size: showYAxis
+            ? (_u, values) => yAxisTickBandWidth(values)
+            : 0,
+          ticks: { show: showYAxis },
           ...(channelKey === "rpm" && {
             incrs: [100, 200, 250, 500, 1000, 2000, 2500, 5000],
           }),
+          ...(channelKey === "gear" && {
+            incrs: [1],
+          }),
           values: (_u, vals) =>
-            vals.map((v) =>
-              formatYTick(
-                channelKey,
-                channelKey === "steering" ? steeringToPercent(v) : v,
-                prefsRef.current.deltaUnit,
-              ),
-            ),
+            showYAxis
+              ? vals.map((v) =>
+                  formatYTick(channelKey, v, prefsRef.current.deltaUnit, game),
+                )
+              : vals.map(() => ""),
         },
       ],
       legend: {
-        live: true,
+        live: !yAxisOnly,
+        show: true,
       },
-      cursor: {
-        drag: { x: false, y: false },
-        sync: { key: "simtelemetry" },
-        focus: { prox: -1 },
-        points: {
-          width: 2,
-        },
-      },
+      cursor: yAxisOnly
+        ? { show: false }
+        : {
+            drag: { x: false, y: false },
+            sync: { key: "simtelemetry" },
+            focus: { prox: -1 },
+            points: {
+              width: 2,
+            },
+          },
       hooks: {
         ready: [hideLegendDistanceRow],
         setLegend: [hideLegendDistanceRow],
-        setCursor: [
-          (u) => {
-            if (!u.cursor.event) return;
-            const idx = u.cursor.idx;
-            if (idx == null) return;
-            onCursorMoveRef.current?.(u.data[0][idx] ?? null);
-          },
-        ],
+        setCursor: yAxisOnly
+          ? []
+          : [
+              (u) => {
+                if (!u.cursor.event) return;
+                const idx = u.cursor.idx;
+                if (idx == null) return;
+                onCursorMoveRef.current?.(u.data[0][idx] ?? null);
+              },
+            ],
       },
     };
 
     if (plotRef.current) {
-      onPlotUnmountRef.current?.(plotRef.current);
+      if (!yAxisOnly) onPlotUnmountRef.current?.(plotRef.current);
       plotRef.current.destroy();
     }
     plotRef.current = new uPlot(opts, data, rootRef.current);
-    onPlotMountRef.current?.(plotRef.current);
+    if (!yAxisOnly) onPlotMountRef.current?.(plotRef.current);
     hideLegendDistanceRow(plotRef.current);
 
     const onWindowResize = () => {
@@ -431,7 +473,7 @@ export function DistanceChart({
     return () => {
       window.removeEventListener("resize", onWindowResize);
       if (plotRef.current) {
-        onPlotUnmountRef.current?.(plotRef.current);
+        if (!yAxisOnly) onPlotUnmountRef.current?.(plotRef.current);
         plotRef.current.destroy();
         plotRef.current = null;
       }
@@ -439,11 +481,16 @@ export function DistanceChart({
   }, [
     samplesByLap,
     channelKey,
+    game,
     title,
     segmentZoom,
     compact,
+    hideYAxis,
+    yAxisOnly,
     showNoData,
     valueSelector,
+    scaleSamplesByLap,
+    yRange,
     prefs.speedUnit,
     prefs.deltaUnit,
     prefs.fuelUnit,
@@ -462,13 +509,16 @@ export function DistanceChart({
   }, [height]);
 
   return (
-    <div className={`chart-panel${compact ? " chart-panel-compact" : ""}`}>
+    <div
+      className={`chart-panel${compact ? " chart-panel-compact" : ""}${yAxisOnly ? " chart-panel-yaxis-only" : ""}`}
+    >
       {showNoData ? (
         <div className="chart-no-data">
           <span className="muted">{title} — No data</span>
         </div>
-      ) : samplesByLap.length === 0 ||
-        (samplesByLap[0]?.samples.length ?? 0) === 0 ? (
+      ) : !yAxisOnly &&
+        (samplesByLap.length === 0 ||
+          (samplesByLap[0]?.samples.length ?? 0) === 0) ? (
         <p className="muted small chart-empty">{title} — loading…</p>
       ) : null}
       <div className="chart-panel-plot" ref={rootRef} />

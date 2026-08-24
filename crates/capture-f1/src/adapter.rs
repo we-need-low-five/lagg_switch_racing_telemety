@@ -1,6 +1,6 @@
 use crate::packets::{
-    CarTelemetryData, LapData, PacketHeader, DEFAULT_PORT, PACKET_ID_LAP_DATA, PACKET_ID_MOTION,
-    PACKET_ID_TELEMETRY,
+    sector_ms, CarTelemetryData, LapData, PacketHeader, DEFAULT_PORT, PACKET_ID_LAP_DATA,
+    PACKET_ID_MOTION, PACKET_ID_TELEMETRY,
 };
 use chrono::Utc;
 use sim_core::{
@@ -9,10 +9,11 @@ use sim_core::{
 };
 use socket2::{Domain, Socket, Type};
 use std::mem::{size_of, MaybeUninit};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct CarMotionData {
     world_position_x: f32,
     world_position_y: f32,
@@ -26,6 +27,8 @@ pub struct F1Adapter {
     socket: Option<Socket>,
     player_index: u8,
     last_lap_num: u8,
+    /// Latched from the lap that just finished (not the new current lap).
+    completed_lap_invalid: u8,
     session_announced: bool,
     latest_lap: Option<LapData>,
     latest_telemetry: Option<CarTelemetryData>,
@@ -44,6 +47,7 @@ impl F1Adapter {
             socket: None,
             player_index: 0,
             last_lap_num: 0,
+            completed_lap_invalid: 0,
             session_announced: false,
             latest_lap: None,
             latest_telemetry: None,
@@ -65,7 +69,8 @@ impl F1Adapter {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let addr: SocketAddr = format!("0.0.0.0:{}", self.port).parse().unwrap();
+        // Bind localhost only — avoid accepting spoofed telemetry from the LAN.
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
         if socket.set_reuse_address(true).is_err() {
             return false;
         }
@@ -137,6 +142,21 @@ impl F1Adapter {
             self.latest_telemetry = Some(read_unaligned::<CarTelemetryData>(&buf[start..]));
         }
     }
+
+    fn latch_sector_times(&mut self, lap: &LapData) {
+        let s1_ms = { lap.sector1_time_ms_part };
+        let s1_min = { lap.sector1_time_minutes_part };
+        let s2_ms = { lap.sector2_time_ms_part };
+        let s2_min = { lap.sector2_time_minutes_part };
+        let s1 = sector_ms(s1_ms, s1_min);
+        let s2 = sector_ms(s2_ms, s2_min);
+        if s1 > 0 {
+            self.sector_times.s1_ms = Some(s1);
+        }
+        if s2 > 0 {
+            self.sector_times.s2_ms = Some(s2);
+        }
+    }
 }
 
 impl Default for F1Adapter {
@@ -178,11 +198,19 @@ impl GameAdapter for F1Adapter {
 
         if self.last_lap_num > 0 && lap.current_lap_num > self.last_lap_num {
             let lap_time_ms = lap.last_lap_time_ms;
+            // Use validity latched from the finished lap, not the new current lap.
+            let valid = self.completed_lap_invalid == 0 && lap_time_ms > 0;
+            let mut sectors = self.sector_times.clone();
+            if let (Some(s1), Some(s2)) = (sectors.s1_ms, sectors.s2_ms) {
+                if lap_time_ms > s1 + s2 {
+                    sectors.s3_ms = Some(lap_time_ms - s1 - s2);
+                }
+            }
             let summary = LapSummary {
                 lap_number: self.last_lap_num as u32,
                 lap_time_ms,
-                valid: lap.current_lap_invalid == 0 && lap_time_ms > 0,
-                sectors: self.sector_times.clone(),
+                valid,
+                sectors,
                 tyre_compound: None,
                 tc_level: None,
                 abs_level: None,
@@ -194,20 +222,26 @@ impl GameAdapter for F1Adapter {
                 s3_ms: None,
             };
             self.last_lap_num = lap.current_lap_num;
+            self.completed_lap_invalid = lap.current_lap_invalid;
+            self.latch_sector_times(&lap);
             return AdapterEvent::LapCompleted(summary);
         }
 
         if self.last_lap_num == 0 {
             self.last_lap_num = lap.current_lap_num.max(1);
+            self.completed_lap_invalid = lap.current_lap_invalid;
             return AdapterEvent::LapStarted {
                 lap_number: self.last_lap_num as u32,
             };
         }
 
+        // Still on the same lap — latch invalid flag and sector splits for when it ends.
+        self.completed_lap_invalid = lap.current_lap_invalid;
+        self.latch_sector_times(&lap);
         self.last_lap_num = lap.current_lap_num;
 
         let (pos_x, pos_y, pos_z) = self.latest_motion.unwrap_or((0.0, 0.0, 0.0));
-        let (speed, throttle, brake, steer, gear, rpm) =
+        let (speed, throttle, brake, steer, gear, rpm, tyre_temps) =
             if let Some(t) = self.latest_telemetry {
                 (
                     t.speed as f32 / 3.6,
@@ -216,9 +250,10 @@ impl GameAdapter for F1Adapter {
                     t.steer,
                     t.gear as i32,
                     t.engine_rpm as f32,
+                    Some(t.tyres_inner_temperature),
                 )
             } else {
-                (0.0, 0.0, 0.0, 0.0, 0, 0.0)
+                (0.0, 0.0, 0.0, 0.0, 0, 0.0, None)
             };
 
         let pit_status = lap.pit_status;
@@ -239,10 +274,10 @@ impl GameAdapter for F1Adapter {
             pos_y,
             pos_z,
             fuel: None,
-            tyre_temp_fl: None,
-            tyre_temp_fr: None,
-            tyre_temp_rl: None,
-            tyre_temp_rr: None,
+            tyre_temp_fl: tyre_temps.map(|t| t[0] as f32),
+            tyre_temp_fr: tyre_temps.map(|t| t[1] as f32),
+            tyre_temp_rl: tyre_temps.map(|t| t[2] as f32),
+            tyre_temp_rr: tyre_temps.map(|t| t[3] as f32),
             tyre_press_fl: None,
             tyre_press_fr: None,
             tyre_press_rl: None,

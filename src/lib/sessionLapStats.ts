@@ -7,6 +7,52 @@ export interface SessionLapStats {
   averageLapMs: number | null;
   averageValidLapMs: number | null;
   validLapCount: number;
+  /** Mean fuel used per valid lap (L), after dropping extreme IQR outliers. */
+  averageFuelL: number | null;
+  /** Valid laps included in averageFuelL (finite fuel readings after outlier filter). */
+  averageFuelLapCount: number;
+}
+
+/** Tukey extreme-outlier fence multiplier (beyond 3×IQR). */
+const EXTREME_OUTLIER_IQR_FACTOR = 3;
+
+function quantileSorted(sorted: number[], q: number): number {
+  if (sorted.length === 1) return sorted[0];
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  const t = pos - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
+}
+
+/**
+ * Arithmetic mean after excluding Tukey extreme outliers (outside Q1−3·IQR … Q3+3·IQR).
+ * With fewer than 4 samples, IQR fences are unreliable so all values are kept.
+ */
+export function averageExcludingExtremeOutliers(
+  values: number[],
+): { average: number | null; usedCount: number } {
+  if (values.length === 0) {
+    return { average: null, usedCount: 0 };
+  }
+
+  let used = values;
+  if (values.length >= 4) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const q1 = quantileSorted(sorted, 0.25);
+    const q3 = quantileSorted(sorted, 0.75);
+    const iqr = q3 - q1;
+    if (iqr > 0) {
+      const lower = q1 - EXTREME_OUTLIER_IQR_FACTOR * iqr;
+      const upper = q3 + EXTREME_OUTLIER_IQR_FACTOR * iqr;
+      const filtered = values.filter((v) => v >= lower && v <= upper);
+      if (filtered.length > 0) used = filtered;
+    }
+  }
+
+  const average = used.reduce((sum, v) => sum + v, 0) / used.length;
+  return { average, usedCount: used.length };
 }
 
 export function computeSessionLapStats(laps: LapRecord[], game?: GameId): SessionLapStats {
@@ -17,6 +63,8 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
       averageLapMs: null,
       averageValidLapMs: null,
       validLapCount: 0,
+      averageFuelL: null,
+      averageFuelLapCount: 0,
     };
   }
 
@@ -64,11 +112,18 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
       ? bestS1 + bestS2 + bestS3
       : null;
 
+  const fuelValues = validLaps
+    .map((lap) => lap.fuel_used_l)
+    .filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
+  const fuelAvg = averageExcludingExtremeOutliers(fuelValues);
+
   return {
     bestLap,
     optimalLapMs,
     averageLapMs,
     averageValidLapMs,
     validLapCount: validLaps.length,
+    averageFuelL: fuelAvg.average,
+    averageFuelLapCount: fuelAvg.usedCount,
   };
 }

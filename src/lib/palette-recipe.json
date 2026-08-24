@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "colors": [
+    "#221C26",
+    "#3B3240",
+    "#53465A"
+  ],
+  "seedIndex": 0,
+  "mode": "all",
+  "newSeed": "#547373",
+  "flags": [
+    [
+      "--background"
+    ],
+    [
+      "--card"
+    ],
+    [
+      "--primary",
+      "--secondary"
+    ]
+  ]
+}

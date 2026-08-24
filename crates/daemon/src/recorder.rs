@@ -1,21 +1,23 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use sim_capture_acc::AccAdapter;
 use sim_capture_ac::AcAdapter;
 use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
-    resample_to_distance_grid, compute_fuel_used_l, channel_manifest_json, AdapterEvent, GameAdapter,
-    GameId, RecordingStatus, SessionInfo, TelemetrySample,
+    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, AdapterEvent,
+    GameAdapter, GameId, RecordingStatus, SessionInfo, TelemetrySample,
 };
-use sim_storage::{write_lap_parquet, Database};
+use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::detect_running_game;
 
 pub struct RecordingService {
-    db: Database,
+    db: Arc<Mutex<Database>>,
     data_dir: PathBuf,
     adapter: Option<Box<dyn GameAdapter>>,
     session_id: Option<Uuid>,
@@ -30,7 +32,7 @@ pub struct RecordingService {
 }
 
 impl RecordingService {
-    pub fn new(db: Database, data_dir: PathBuf) -> Self {
+    pub fn new(db: Arc<Mutex<Database>>, data_dir: PathBuf) -> Self {
         Self {
             db,
             data_dir,
@@ -43,7 +45,8 @@ impl RecordingService {
             last_tick: Instant::now(),
             sample_rate_estimate: 0.0,
             session_info: None,
-            heartbeat_deadline: Instant::now(),
+            // Far future until a session starts.
+            heartbeat_deadline: Instant::now() + Duration::from_secs(365 * 24 * 3600),
         }
     }
 
@@ -60,6 +63,14 @@ impl RecordingService {
             return Ok(None);
         };
 
+        // Silent game / frozen SHM: finalize like disconnect.
+        if self.session_id.is_some() && Instant::now() > self.heartbeat_deadline {
+            notification = Some(self.finalize_session_message());
+            self.reset_session_state();
+            self.adapter = None;
+            return Ok(notification);
+        }
+
         let event = adapter.poll();
         match event {
             AdapterEvent::Disconnected => {
@@ -74,7 +85,7 @@ impl RecordingService {
                     if info.track.trim().is_empty() || info.car.trim().is_empty() {
                         return Ok(notification);
                     }
-                    let id = self.db.create_session(
+                    let id = self.db.lock().create_session(
                         info.game,
                         &info.track_id,
                         &info.track,
@@ -85,6 +96,7 @@ impl RecordingService {
                     self.session_id = Some(id);
                     self.session_info = Some(info);
                     self.paused = false;
+                    self.samples_recorded = 0;
                     self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
                     notification = Some(format!(
                         "Recording {} — {} / {}",
@@ -98,7 +110,7 @@ impl RecordingService {
                         current.track.trim().is_empty() && !info.track.trim().is_empty()
                     });
                     if needs_update {
-                        self.db.update_session_metadata(
+                        self.db.lock().update_session_metadata(
                             session_id,
                             &info.track_id,
                             &info.track,
@@ -113,16 +125,18 @@ impl RecordingService {
             AdapterEvent::LapStarted { lap_number } => {
                 self.current_lap_number = lap_number;
                 self.current_lap_samples.clear();
+                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
             }
             AdapterEvent::LapCompleted(summary) => {
                 if let Some(session_id) = self.session_id {
-                    self.flush_lap(session_id, &summary)?;
-                    notification = Some(format!(
-                        "Lap {} saved — {} ({})",
-                        summary.lap_number,
-                        format_lap_time(summary.lap_time_ms),
-                        if summary.valid { "valid" } else { "invalid" }
-                    ));
+                    if self.flush_lap(session_id, &summary)? {
+                        notification = Some(format!(
+                            "Lap {} saved — {} ({})",
+                            summary.lap_number,
+                            format_lap_time(summary.lap_time_ms),
+                            if summary.valid { "valid" } else { "invalid" }
+                        ));
+                    }
                 }
                 self.current_lap_samples.clear();
                 self.current_lap_number = summary.lap_number + 1;
@@ -140,52 +154,64 @@ impl RecordingService {
                     self.last_tick = Instant::now();
                 }
             }
-            AdapterEvent::Heartbeat | AdapterEvent::None => {}
+            AdapterEvent::Heartbeat => {
+                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
+            }
+            AdapterEvent::None => {}
         }
 
         Ok(notification)
     }
 
+    /// Returns true when a lap was persisted.
     fn flush_lap(
         &mut self,
         session_id: Uuid,
         summary: &sim_core::LapSummary,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut summary = summary.clone();
         if summary.fuel_used_l.is_none() {
             summary.fuel_used_l = compute_fuel_used_l(&self.current_lap_samples);
         }
         let grid = resample_to_distance_grid(&self.current_lap_samples);
-        if grid.is_empty() {
+        if grid.is_empty() || summary.lap_time_ms == 0 {
             tracing::warn!(
                 lap = summary.lap_number,
                 samples = self.current_lap_samples.len(),
-                "lap completed with insufficient telemetry samples"
+                lap_time_ms = summary.lap_time_ms,
+                "skipping lap with insufficient telemetry or zero time"
             );
+            return Ok(false);
         }
+
+        let lap_id = Uuid::new_v4();
+        let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
+        let abs = resolve_data_relative(&self.data_dir, &rel)?;
+        // File I/O first (no DB lock), then short DB insert.
+        write_lap_parquet(&abs, &grid)?;
         let manifest = channel_manifest_json(&grid);
-        let lap_id = self.db.insert_lap(
+        if let Err(err) = self.db.lock().insert_lap_with_id(
+            lap_id,
             session_id,
             &summary,
-            "",
+            &rel,
             self.sample_rate_estimate,
             &manifest,
-        )?;
-        let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
-        let abs = self.data_dir.join(&rel);
-        write_lap_parquet(&abs, &grid)?;
-        self.db.update_lap_parquet_path(lap_id, &rel)?;
-        Ok(())
+        ) {
+            let _ = std::fs::remove_file(&abs);
+            return Err(err);
+        }
+        Ok(true)
     }
 
     fn finalize_session_message(&mut self) -> String {
         let laps = self
             .session_id
-            .and_then(|id| self.db.list_laps(id).ok())
+            .and_then(|id| self.db.lock().list_laps(id).ok())
             .map(|l| l.len())
             .unwrap_or(0);
         if let Some(id) = self.session_id.take() {
-            let _ = self.db.finalize_session(id);
+            let _ = self.db.lock().finalize_session(id);
         }
         format!("Session saved — {laps} laps")
     }
@@ -196,6 +222,7 @@ impl RecordingService {
         self.current_lap_samples.clear();
         self.current_lap_number = 1;
         self.paused = false;
+        self.heartbeat_deadline = Instant::now() + Duration::from_secs(365 * 24 * 3600);
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -218,14 +245,6 @@ impl RecordingService {
             current_lap: self.current_lap_number,
             samples_recorded: self.samples_recorded,
         }
-    }
-
-    pub fn pin_lap(&self, lap_id: Uuid, pinned: bool) -> Result<()> {
-        self.db.set_lap_pinned(lap_id, pinned)
-    }
-
-    pub fn db(&self) -> &Database {
-        &self.db
     }
 }
 

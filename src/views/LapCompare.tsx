@@ -232,6 +232,7 @@ export function LapCompare() {
         selectedIds={compareIds}
         referenceId={referenceId}
         samples={samples}
+        game={sessionMeta?.game ?? null}
         trackLayout={trackLayout}
         layoutLoading={layoutLoading}
         error={error}

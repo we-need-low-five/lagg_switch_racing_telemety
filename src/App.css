@@ -7,23 +7,23 @@
   color-scheme: dark;
   --compare-chrome-height: 7.5rem;
 
-  /* Theme palette (defaults: h≈220; overridden by applyTheme) */
-  --theme-h: 220;
-  --bg-base: hsl(220 39% 7%);
-  --bg-surface: hsl(250 9% 12%);
-  --bg-surface-elevated: hsl(250 11% 14%);
-  --bg-control: hsl(266 15% 15%);
-  --accent: hsl(266 15% 15%);
-  --accent-hover: hsl(266 18% 22%);
-  --accent-active: hsl(266 35% 30%);
-  --border-color: hsl(250 9% 22%);
-  --border-control: hsl(266 15% 28%);
-  --text-primary: hsl(220 20% 92%);
-  --text-muted: hsl(220 12% 62%);
-  --text-secondary: hsl(220 15% 78%);
-  --text-on-control: hsl(220 25% 95%);
-  --link-color: hsl(266 50% 68%);
-  --overlay-backdrop: hsl(220 39% 7% / 0.72);
+  /* Theme palette (recipe seed #221C26; overridden by applyTheme) */
+  --theme-h: 276;
+  --bg-base: #221c26;
+  --bg-surface: #3b3240;
+  --bg-surface-elevated: hsl(279 14% 24%);
+  --bg-control: #53465a;
+  --accent: #53465a;
+  --accent-hover: hsl(279 16% 38%);
+  --accent-active: hsl(279 32% 46%);
+  --border-color: hsl(279 12% 32%);
+  --border-control: hsl(279 12% 44%);
+  --text-primary: hsl(276 20% 92%);
+  --text-muted: hsl(276 12% 62%);
+  --text-secondary: hsl(276 15% 78%);
+  --text-on-control: hsl(279 25% 95%);
+  --link-color: hsl(279 50% 68%);
+  --overlay-backdrop: color-mix(in srgb, #221c26 72%, transparent);
 
   /* Semantic (fixed hue) */
   --color-positive: hsl(142 55% 55%);
@@ -36,10 +36,10 @@
   --color-warning-text: hsl(43 90% 65%);
   --color-danger-bg: hsl(0 50% 22%);
 
-  --chart-grid: hsl(250 9% 18%);
-  --chart-axis: hsl(220 12% 62%);
-  --scrollbar-thumb: hsl(266 15% 25%);
-  --scrollbar-track: hsl(250 9% 10%);
+  --chart-grid: hsl(279 12% 28%);
+  --chart-axis: hsl(276 12% 62%);
+  --scrollbar-thumb: hsl(279 12% 41%);
+  --scrollbar-track: hsl(279 12% 20%);
   --track-map-bg: var(--bg-surface-elevated);
   --track-map-outline: var(--border-color);
   --track-map-outline-inner: var(--text-muted);
@@ -1136,6 +1136,7 @@ input[type="color"] {
 
 .chart-panel-compact .chart-panel-plot .uplot .u-title {
   font-size: 0.75rem;
+  min-height: 1.1em;
 }
 
 .chart-no-data {
@@ -1151,27 +1152,25 @@ input[type="color"] {
   pointer-events: none;
 }
 
-.compare-tyre-section {
-  margin-top: 0.75rem;
-}
-
-.compare-tyre-section-title {
-  margin: 0 0 0.5rem;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
 .compare-tyre-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
   gap: 0.5rem;
+  align-items: stretch;
 }
 
-.compare-tyre-grid .collapsible-chart {
+.compare-tyre-grid .chart-panel {
   min-width: 0;
+}
+
+.chart-panel-yaxis-only {
+  width: 5.5rem;
+  min-width: 5.5rem;
+}
+
+.chart-panel-yaxis-only .u-title,
+.chart-panel-yaxis-only .u-legend {
+  visibility: hidden;
 }
 
 .chart-panel-plot {
@@ -1329,7 +1328,7 @@ input[type="color"] {
 /* —— Session review table —— */
 .review-summary-cards {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.75rem;
   margin-bottom: 1rem;
 }
@@ -1362,6 +1361,12 @@ input[type="color"] {
 
 .review-summary-meta {
   font-size: 0.82rem;
+}
+
+@media (max-width: 1100px) {
+  .review-summary-cards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {

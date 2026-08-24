@@ -113,7 +113,8 @@ export function Settings() {
 
             <h2>Inputs</h2>
             <p className="muted">
-              Throttle and brake are shown as %. Steering uses L/R with % magnitude.
+              Throttle and brake are shown as %. ACC steering is wheel angle in
+              degrees. Other games show steering as L/R with % magnitude.
             </p>
 
             <h2>Fuel</h2>
@@ -190,7 +191,7 @@ export function Settings() {
         {tab === "appearance" && (
           <div className="settings-section">
             <h2>Background</h2>
-            <p className="muted">Choose a preset or custom base color. Panels and text adapt for readability.</p>
+            <p className="muted">The picked color is the page background. Panels, controls, and text follow the palette recipe.</p>
             <div className="preset-swatches">
               {Object.entries(BACKGROUND_PRESETS).map(([id, color]) => (
                 <button
