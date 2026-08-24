@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, memo, type CSSProperties, type RefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo, type RefObject, type ReactNode } from "react";
 import type uPlot from "uplot";
 import { DistanceChart } from "../charts/DistanceChart";
 import { SegmentDeltaStrip } from "../charts/SegmentDeltaStrip";
@@ -77,6 +77,8 @@ export interface LapCompareViewProps {
   layoutLoading: boolean;
   error?: string | null;
   lapPanel?: ReactNode;
+  /** Called when the Track Map "Laps" toolbar button is pressed. */
+  onOpenLapPicker?: () => void;
 }
 
 const TYRE_CHART_HEIGHT = 160;
@@ -298,10 +300,12 @@ export function LapCompareView({
   layoutLoading,
   error,
   lapPanel,
+  onOpenLapPicker,
 }: LapCompareViewProps) {
   const [prefs, setPrefs] = usePreferences();
   const [trackCursorPct, setTrackCursorPct] = useState<number | null>(null);
   const [trackMode, setTrackMode] = useState<"speed" | "delta">("speed");
+  const [showLaps, setShowLaps] = useState(false);
   const [segmentTab, setSegmentTab] = useState<SegmentTab>("full");
   const [liveColumnSplitPct, setLiveColumnSplitPct] = useState<number | null>(null);
 
@@ -310,7 +314,6 @@ export function LapCompareView({
   const chartsScrollRef = useRef<HTMLDivElement>(null);
   const chartsScrollTopRef = useRef(0);
   const rightColRef = useRef<HTMLElement>(null);
-  const liveMapSplitRef = useRef<number | null>(null);
   const segmentTabRef = useRef(segmentTab);
   segmentTabRef.current = segmentTab;
 
@@ -356,16 +359,6 @@ export function LapCompareView({
   );
 
   const columnSplitPct = liveColumnSplitPct ?? prefs.layout.columnSplitPct;
-  const mapLapSplitPct = liveMapSplitRef.current ?? prefs.layout.mapLapSplitPct;
-
-  useEffect(() => {
-    if (rightColRef.current) {
-      rightColRef.current.style.setProperty(
-        "--map-split-pct",
-        `${prefs.layout.mapLapSplitPct}%`,
-      );
-    }
-  }, [prefs.layout.mapLapSplitPct]);
 
   const selectedMetas = useMemo(
     () =>
@@ -626,28 +619,6 @@ export function LapCompareView({
     setLiveColumnSplitPct(null);
   }, [liveColumnSplitPct, setPrefs]);
 
-  const handleMapLapDrag = useCallback(
-    (deltaPx: number) => {
-      const el = rightColRef.current;
-      if (!el) return;
-      const total = el.clientHeight;
-      if (total <= 0) return;
-      const deltaPct = (deltaPx / total) * 100;
-      const base = liveMapSplitRef.current ?? prefs.layout.mapLapSplitPct;
-      const next = Math.min(85, Math.max(25, base + deltaPct));
-      liveMapSplitRef.current = next;
-      el.style.setProperty("--map-split-pct", `${next}%`);
-    },
-    [prefs.layout.mapLapSplitPct],
-  );
-
-  const handleMapLapDragEnd = useCallback(() => {
-    const next = liveMapSplitRef.current;
-    if (next == null) return;
-    setPrefs({ layout: { mapLapSplitPct: next } });
-    liveMapSplitRef.current = null;
-  }, [setPrefs]);
-
   const handleChartResizeCommit = useCallback(
     (key: string, height: number) => {
       const scrollTop = chartsScrollRef.current?.scrollTop ?? 0;
@@ -790,10 +761,7 @@ export function LapCompareView({
           ref={rightColRef}
           className={`compare-right${
             prefs.layout.mapCollapsed ? " map-collapsed" : ""
-          }${prefs.layout.lapsCollapsed ? " laps-collapsed" : ""}`}
-          style={
-            { "--map-split-pct": `${mapLapSplitPct}%` } as CSSProperties
-          }
+          }`}
         >
           <div className="compare-right-map">
             <CollapsiblePanel
@@ -805,61 +773,62 @@ export function LapCompareView({
                 })
               }
               toolbar={
-                <div>
+                <div className="track-map-toolbar">
                   <button
                     type="button"
-                    className={trackMode === "speed" ? "" : "secondary"}
-                    onClick={() => setTrackMode("speed")}
+                    className={
+                      !showLaps && trackMode === "speed" ? "" : "secondary"
+                    }
+                    onClick={() => {
+                      setShowLaps(false);
+                      setTrackMode("speed");
+                    }}
                   >
                     Speed
                   </button>
                   <button
                     type="button"
-                    className={trackMode === "delta" ? "" : "secondary"}
-                    onClick={() => setTrackMode("delta")}
+                    className={
+                      !showLaps && trackMode === "delta" ? "" : "secondary"
+                    }
+                    onClick={() => {
+                      setShowLaps(false);
+                      setTrackMode("delta");
+                    }}
                   >
                     Delta
                   </button>
+                  {lapPanel && (
+                    <button
+                      type="button"
+                      className={showLaps ? "" : "secondary"}
+                      onClick={() => {
+                        onOpenLapPicker?.();
+                        setShowLaps(true);
+                      }}
+                    >
+                      Laps
+                    </button>
+                  )}
                 </div>
               }
               className="track-map-panel"
             >
-              <TrackMap
-                layout={trackLayout}
-                layoutLoading={layoutLoading}
-                samplesByLap={fullChartSeries}
-                mode={trackMode}
-                reference={referenceSamples}
-                cursorPct={trackCursorPct}
-                onCursorMove={handleTrackMapCursorMove}
-              />
+              {showLaps && lapPanel ? (
+                <div className="track-map-laps">{lapPanel}</div>
+              ) : (
+                <TrackMap
+                  layout={trackLayout}
+                  layoutLoading={layoutLoading}
+                  samplesByLap={fullChartSeries}
+                  mode={trackMode}
+                  reference={referenceSamples}
+                  cursorPct={trackCursorPct}
+                  onCursorMove={handleTrackMapCursorMove}
+                />
+              )}
             </CollapsiblePanel>
           </div>
-
-          {!prefs.layout.mapCollapsed && lapPanel && (
-            <ResizeSplitter
-              orientation="horizontal"
-              onDrag={handleMapLapDrag}
-              onDragEnd={handleMapLapDragEnd}
-            />
-          )}
-
-          {lapPanel && (
-            <div className="compare-right-laps">
-              <CollapsiblePanel
-                title="Laps"
-                collapsed={prefs.layout.lapsCollapsed}
-                onToggle={() =>
-                  setPrefs({
-                    layout: { lapsCollapsed: !prefs.layout.lapsCollapsed },
-                  })
-                }
-                className="lap-panel-wrapper"
-              >
-                {lapPanel}
-              </CollapsiblePanel>
-            </div>
-          )}
         </aside>
       </div>
     </>

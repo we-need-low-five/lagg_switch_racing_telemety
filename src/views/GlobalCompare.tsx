@@ -267,6 +267,7 @@ export function GlobalCompare() {
         trackLayout={trackLayout}
         layoutLoading={layoutLoading}
         error={error}
+        onOpenLapPicker={handleReopenPicker}
         lapPanel={
           compareIds.length > 0 ? (
             <div className="lap-panel global-ref-panel">

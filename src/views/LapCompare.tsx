@@ -38,7 +38,6 @@ export function LapCompare() {
   const [sessionMeta, setSessionMeta] = useState<
     Awaited<ReturnType<typeof getSession>>
   >(null);
-  const [pickerOpen, setPickerOpen] = useState(true);
   const [draftIds, setDraftIds] = useState<string[]>([]);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [externalMetas, setExternalMetas] = useState<CompareLapMeta[]>([]);
@@ -89,7 +88,6 @@ export function LapCompare() {
             setDraftIds(ids);
             setCompareIds(ids);
             setReferenceId(ref);
-            setPickerOpen(false);
             setNavApplied(true);
             return;
           }
@@ -201,12 +199,10 @@ export function LapCompare() {
     setReferenceId((prev) =>
       prev && draftIds.includes(prev) ? prev : draftIds[0],
     );
-    setPickerOpen(false);
   }
 
   function handleReopenPicker() {
     setDraftIds(compareIds);
-    setPickerOpen(true);
   }
 
   return (
@@ -236,15 +232,15 @@ export function LapCompare() {
         trackLayout={trackLayout}
         layoutLoading={layoutLoading}
         error={error}
+        onOpenLapPicker={handleReopenPicker}
         lapPanel={
           <LapPanel
             laps={laps}
             draftIds={draftIds}
-            comparedIds={compareIds}
-            pickerOpen={pickerOpen}
             referenceId={referenceId}
             externalMetas={externalMetas}
             canAddExternal={canAddLap(draftIds.length) && sessionMeta != null}
+            game={sessionMeta?.game ?? null}
             onToggleLap={toggleLap}
             onSetReference={setReferenceId}
             onPinLap={pinLap}
@@ -253,7 +249,6 @@ export function LapCompare() {
             }}
             onAddExternal={openModal}
             onCompare={handleCompare}
-            onReopenPicker={handleReopenPicker}
           />
         }
         />

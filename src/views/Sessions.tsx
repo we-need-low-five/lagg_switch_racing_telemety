@@ -9,6 +9,7 @@ import {
   listSessions,
   setRecordingPaused,
 } from "../api";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { OverflowMenu } from "../components/OverflowMenu";
 import { formatCarName } from "../lib/formatCarName";
 import { sessionBundleFileName } from "../lib/sessionBundleName";
@@ -21,6 +22,8 @@ export function Sessions() {
   const [status, setStatus] = useState<RecordingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SessionRecord | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -75,17 +78,18 @@ export function Sessions() {
     }
   }
 
-  async function handleDelete(sessionId: string) {
-    const confirmed = window.confirm(
-      "Delete this session and all its lap data? This cannot be undone.",
-    );
-    if (!confirmed) return;
+  async function confirmDelete() {
+    if (!pendingDelete || deleting) return;
     try {
+      setDeleting(true);
       setError(null);
-      await deleteSession(sessionId);
+      await deleteSession(pendingDelete.id);
+      setPendingDelete(null);
       await refresh();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -187,7 +191,7 @@ export function Sessions() {
                   },
                   {
                     label: "Delete",
-                    onClick: () => handleDelete(session.id),
+                    onClick: () => setPendingDelete(session),
                     danger: true,
                   },
                 ]}
@@ -197,6 +201,22 @@ export function Sessions() {
         ))}
       </div>
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete != null}
+        title="Delete session?"
+        message={
+          pendingDelete
+            ? `Delete ${pendingDelete.track || "this session"} (${formatCarName(pendingDelete.car)}) and all its lap data? This cannot be undone.`
+            : ""
+        }
+        confirmLabel={deleting ? "Deleting…" : "Delete"}
+        danger
+        onCancel={() => {
+          if (!deleting) setPendingDelete(null);
+        }}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }

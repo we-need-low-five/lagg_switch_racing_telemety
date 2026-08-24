@@ -3,6 +3,10 @@ import { displaySectorTimes } from "./compareLaps";
 
 export interface SessionLapStats {
   bestLap: LapRecord | null;
+  /** Fastest S1/S2/S3 among valid laps (ms). */
+  bestS1Ms: number | null;
+  bestS2Ms: number | null;
+  bestS3Ms: number | null;
   optimalLapMs: number | null;
   averageLapMs: number | null;
   averageValidLapMs: number | null;
@@ -59,6 +63,9 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
   if (laps.length === 0) {
     return {
       bestLap: null,
+      bestS1Ms: null,
+      bestS2Ms: null,
+      bestS3Ms: null,
       optimalLapMs: null,
       averageLapMs: null,
       averageValidLapMs: null,
@@ -119,6 +126,9 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
 
   return {
     bestLap,
+    bestS1Ms: bestS1,
+    bestS2Ms: bestS2,
+    bestS3Ms: bestS3,
     optimalLapMs,
     averageLapMs,
     averageValidLapMs,

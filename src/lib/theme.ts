@@ -216,6 +216,22 @@ function fillIsDark(hex: string): boolean {
   return y <= 0.55;
 }
 
+/** Prefer the raw seed when it contrasts with the surface; else keep its hue at a readable lightness. */
+function navIconColorFromSeed(seedHex: string, surfaceHex: string): string {
+  const seed = hexToHsl(seedHex);
+  const surface = hexToHsl(surfaceHex);
+  if (!seed) return seedHex;
+  const surfaceL = surface?.l ?? 20;
+  if (Math.abs(seed.l - surfaceL) >= 28) {
+    return parseHex(seedHex) ?? seedHex;
+  }
+  return hslToHex({
+    h: seed.h,
+    s: Math.max(seed.s, 42),
+    l: surfaceL < 50 ? 72 : 36,
+  });
+}
+
 /** hsl(h s% l%) — modern space-separated syntax for alpha mixes */
 export function themeHsl(h: number, s: number, l: number, alpha?: number): string {
   const base = `hsl(${round1(wrapHue(h))} ${round1(clamp(s, 0, 100))}% ${round1(clamp(l, 0, 100))}%`;
@@ -362,10 +378,14 @@ export function hueFromAppearance(appearance: AppearancePrefs): number {
 
 export function applyTheme(appearance?: AppearancePrefs): void {
   const prefs = appearance ?? getPreferences().appearance;
-  const palette = buildThemePalette(resolveBackgroundBase(prefs));
+  const seedHex = resolveBackgroundBase(prefs);
+  const palette = buildThemePalette(seedHex);
   const root = document.documentElement;
+  const navIconColor = navIconColorFromSeed(seedHex, palette.bgSurface);
 
   root.style.setProperty("--theme-h", String(palette.h));
+  root.style.setProperty("--theme-seed", parseHex(seedHex) ?? seedHex);
+  root.style.setProperty("--nav-icon-color", navIconColor);
   root.style.setProperty("--bg-base", palette.bgBase);
   root.style.setProperty("--bg-surface", palette.bgSurface);
   root.style.setProperty("--bg-surface-elevated", palette.bgSurfaceElevated);

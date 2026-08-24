@@ -1,125 +1,75 @@
-import { useState } from "react";
-import type { LapRecord } from "../types";
+import { useMemo } from "react";
+import type { GameId, LapRecord } from "../types";
 import { formatLapTime } from "../types";
-import type { CompareLapMeta } from "../lib/compareLaps";
-import { MAX_COMPARE_LAPS } from "../lib/compareLaps";
+import {
+  displaySectorTimes,
+  MAX_COMPARE_LAPS,
+  type CompareLapMeta,
+} from "../lib/compareLaps";
+import {
+  formatFuelLiters,
+  fuelUnitLabel,
+  usePreferences,
+} from "../lib/preferences";
+import { computeSessionLapStats } from "../lib/sessionLapStats";
 
 interface LapPanelProps {
   laps: LapRecord[];
   draftIds: string[];
-  comparedIds: string[];
-  pickerOpen: boolean;
   referenceId: string | null;
   externalMetas: CompareLapMeta[];
   canAddExternal: boolean;
+  game?: GameId | null;
   onToggleLap: (id: string) => void;
   onSetReference: (id: string) => void;
   onPinLap: (lapId: string, pinned: boolean) => void;
   onLapsRefresh: () => void;
   onAddExternal: () => void;
   onCompare: () => void;
-  onReopenPicker: () => void;
+}
+
+function formatSectorMs(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  return (ms / 1000).toFixed(3);
+}
+
+function isBestTime(
+  value: number | null | undefined,
+  best: number | null | undefined,
+): boolean {
+  return value != null && best != null && value === best;
 }
 
 export function LapPanel({
   laps,
   draftIds,
-  comparedIds,
-  pickerOpen,
   referenceId,
   externalMetas,
   canAddExternal,
+  game = null,
   onToggleLap,
   onSetReference,
   onPinLap,
   onLapsRefresh,
   onAddExternal,
   onCompare,
-  onReopenPicker,
 }: LapPanelProps) {
-  const [expanded, setExpanded] = useState(true);
-
+  const [prefs] = usePreferences();
   const draftExternal = externalMetas.filter((m) => draftIds.includes(m.lapId));
-  const comparedExternal = externalMetas.filter((m) =>
-    comparedIds.includes(m.lapId),
+  const fuelLabel = fuelUnitLabel(prefs.fuelUnit);
+  const lapStats = useMemo(
+    () => computeSessionLapStats(laps, game ?? undefined),
+    [laps, game],
   );
 
-  if (!pickerOpen) {
-    return (
-      <div className="lap-panel collapsed lap-panel-summary">
-        <div className="lap-panel-summary-header">
-          <span>
-            {comparedIds.length} lap{comparedIds.length !== 1 ? "s" : ""} compared
-          </span>
-          <button
-            type="button"
-            className="secondary lap-panel-reopen"
-            onClick={onReopenPicker}
-          >
-            Change laps
-          </button>
-        </div>
-        <div className="lap-chips">
-          {laps
-            .filter((lap) => comparedIds.includes(lap.id))
-            .map((lap) => {
-              const isRef = referenceId === lap.id;
-              return (
-                <button
-                  key={lap.id}
-                  type="button"
-                  className={`lap-chip ${isRef ? "ref" : ""}`}
-                  onClick={() => onSetReference(lap.id)}
-                  title={`Lap ${lap.lap_number} · ${formatLapTime(lap.lap_time_ms)}`}
-                >
-                  <span>L{lap.lap_number}</span>
-                  <span className="lap-chip-time">
-                    {formatLapTime(lap.lap_time_ms)}
-                  </span>
-                  {lap.is_best && <span className="tag best">B</span>}
-                  {isRef && <span className="tag">Ref</span>}
-                </button>
-              );
-            })}
-          {comparedExternal.map((meta) => {
-            const isRef = referenceId === meta.lapId;
-            return (
-              <button
-                key={meta.lapId}
-                type="button"
-                className={`lap-chip external ${isRef ? "ref" : ""}`}
-                onClick={() => onSetReference(meta.lapId)}
-                title={`${meta.playerName} · ${formatLapTime(meta.lapTimeMs)}`}
-              >
-                <span className="lap-chip-external-label">
-                  {meta.playerName}
-                </span>
-                <span className="lap-chip-time">
-                  {formatLapTime(meta.lapTimeMs)}
-                </span>
-                {isRef && <span className="tag">Ref</span>}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className={`lap-panel ${expanded ? "expanded" : "collapsed"}`}>
+    <div className="lap-panel expanded">
       <div className="lap-panel-header-row">
-        <button
-          type="button"
-          className="lap-panel-header"
-          onClick={() => setExpanded((v) => !v)}
-          aria-expanded={expanded}
-        >
+        <div className="lap-panel-header">
           <span>
             {draftIds.length} lap{draftIds.length !== 1 ? "s" : ""} selected
           </span>
-          <span className="lap-panel-chevron">{expanded ? "▾" : "▴"}</span>
-        </button>
+        </div>
         <button
           type="button"
           className="lap-panel-add secondary"
@@ -131,146 +81,195 @@ export function LapPanel({
         </button>
       </div>
 
-      {!expanded && (
-        <div className="lap-chips">
-          {laps
-            .filter((lap) => draftIds.includes(lap.id))
-            .map((lap) => {
-              const isRef = referenceId === lap.id;
-              return (
-                <button
-                  key={lap.id}
-                  type="button"
-                  className={`lap-chip ${isRef ? "ref" : ""}`}
-                  onClick={() => onToggleLap(lap.id)}
-                  title={`Lap ${lap.lap_number} · ${formatLapTime(lap.lap_time_ms)}`}
-                >
-                  <span>L{lap.lap_number}</span>
-                  <span className="lap-chip-time">
-                    {formatLapTime(lap.lap_time_ms)}
-                  </span>
-                  {lap.is_best && <span className="tag best">B</span>}
-                  {!lap.valid && <span className="tag invalid">!</span>}
-                </button>
-              );
-            })}
-          {draftExternal.map((meta) => {
-            const isRef = referenceId === meta.lapId;
-            return (
-              <button
-                key={meta.lapId}
-                type="button"
-                className={`lap-chip external ${isRef ? "ref" : ""}`}
-                onClick={() => onToggleLap(meta.lapId)}
-                title={`${meta.playerName} · ${formatLapTime(meta.lapTimeMs)}`}
-              >
-                <span className="lap-chip-external-label">
-                  {meta.playerName}
-                </span>
-                <span className="lap-chip-time">
-                  {formatLapTime(meta.lapTimeMs)}
-                </span>
-              </button>
-            );
-          })}
+      <div className="lap-panel-expanded">
+        <p className="muted small">Select up to {MAX_COMPARE_LAPS} laps</p>
+        <div className="lap-list-scroll">
+          <table className="lap-select-table">
+            <thead>
+              <tr>
+                <th className="lap-select-check" />
+                <th>Lap</th>
+                <th>Time</th>
+                <th>S1</th>
+                <th>S2</th>
+                <th>S3</th>
+                <th>Fuel ({fuelLabel})</th>
+                <th className="lap-select-actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {laps.map((lap) => {
+                const sectors = displaySectorTimes(
+                  lap.sectors,
+                  lap.lap_time_ms,
+                  game ?? undefined,
+                );
+                const checked = draftIds.includes(lap.id);
+                return (
+                  <tr
+                    key={lap.id}
+                    className={lap.valid ? undefined : "invalid-lap"}
+                    onClick={() => onToggleLap(lap.id)}
+                  >
+                    <td
+                      className="lap-select-check"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => onToggleLap(lap.id)}
+                        aria-label={`Select lap ${lap.lap_number}`}
+                      />
+                    </td>
+                    <td>
+                      <span className="lap-select-lap">
+                        {lap.lap_number}
+                        {lap.is_best && (
+                          <span className="tag best review-inline-tag">B</span>
+                        )}
+                        {lap.is_pinned && (
+                          <span className="tag pinned review-inline-tag">★</span>
+                        )}
+                        {referenceId === lap.id && (
+                          <span className="tag review-inline-tag">Ref</span>
+                        )}
+                        {!lap.valid && (
+                          <span className="tag invalid review-inline-tag">!</span>
+                        )}
+                      </span>
+                    </td>
+                    <td
+                      className={
+                        lapStats.bestLap?.id === lap.id ? "time-best" : undefined
+                      }
+                    >
+                      {formatLapTime(lap.lap_time_ms)}
+                    </td>
+                    <td
+                      className={
+                        isBestTime(sectors.s1_ms, lapStats.bestS1Ms)
+                          ? "time-best"
+                          : undefined
+                      }
+                    >
+                      {formatSectorMs(sectors.s1_ms)}
+                    </td>
+                    <td
+                      className={
+                        isBestTime(sectors.s2_ms, lapStats.bestS2Ms)
+                          ? "time-best"
+                          : undefined
+                      }
+                    >
+                      {formatSectorMs(sectors.s2_ms)}
+                    </td>
+                    <td
+                      className={
+                        isBestTime(sectors.s3_ms, lapStats.bestS3Ms)
+                          ? "time-best"
+                          : undefined
+                      }
+                    >
+                      {formatSectorMs(sectors.s3_ms)}
+                    </td>
+                    <td>{formatFuelLiters(lap.fuel_used_l, prefs.fuelUnit)}</td>
+                    <td
+                      className="lap-select-actions"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="lap-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => onSetReference(lap.id)}
+                        >
+                          Ref
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={async () => {
+                            await onPinLap(lap.id, !lap.is_pinned);
+                            onLapsRefresh();
+                          }}
+                        >
+                          {lap.is_pinned ? "Unpin" : "Pin"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {draftExternal.map((meta) => {
+                const sectors = displaySectorTimes(
+                  meta.sectors,
+                  meta.lapTimeMs,
+                  game ?? undefined,
+                );
+                const checked = draftIds.includes(meta.lapId);
+                return (
+                  <tr
+                    key={meta.lapId}
+                    onClick={() => onToggleLap(meta.lapId)}
+                  >
+                    <td
+                      className="lap-select-check"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => onToggleLap(meta.lapId)}
+                        aria-label={`Select ${meta.playerName}`}
+                      />
+                    </td>
+                    <td>
+                      <span className="lap-select-lap">
+                        {meta.playerName}
+                        <span className="tag review-inline-tag">External</span>
+                        {referenceId === meta.lapId && (
+                          <span className="tag review-inline-tag">Ref</span>
+                        )}
+                      </span>
+                    </td>
+                    <td>{formatLapTime(meta.lapTimeMs)}</td>
+                    <td>{formatSectorMs(sectors.s1_ms)}</td>
+                    <td>{formatSectorMs(sectors.s2_ms)}</td>
+                    <td>{formatSectorMs(sectors.s3_ms)}</td>
+                    <td>—</td>
+                    <td
+                      className="lap-select-actions"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="lap-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => onSetReference(meta.lapId)}
+                        >
+                          Ref
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-      )}
-
-      {expanded && (
-        <div className="lap-panel-expanded">
-          <p className="muted small">Select up to {MAX_COMPARE_LAPS} laps</p>
-          <div className="lap-list-scroll">
-            {laps.map((lap) => (
-              <label key={lap.id} className="lap-option">
-                <input
-                  type="checkbox"
-                  checked={draftIds.includes(lap.id)}
-                  onChange={() => onToggleLap(lap.id)}
-                />
-                <div>
-                  <strong>Lap {lap.lap_number}</strong>
-                  <span>{formatLapTime(lap.lap_time_ms)}</span>
-                  <div className="lap-tags">
-                    {lap.is_best && <span className="tag best">Best</span>}
-                    {!lap.valid && <span className="tag invalid">Invalid</span>}
-                    {lap.is_pinned && <span className="tag pinned">Pinned</span>}
-                    {referenceId === lap.id && <span className="tag">Ref</span>}
-                  </div>
-                </div>
-                <div className="lap-actions">
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => onSetReference(lap.id)}
-                  >
-                    Ref
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={async () => {
-                      await onPinLap(lap.id, !lap.is_pinned);
-                      onLapsRefresh();
-                    }}
-                  >
-                    {lap.is_pinned ? "Unpin" : "Pin"}
-                  </button>
-                </div>
-              </label>
-            ))}
-
-            {draftExternal.map((meta) => (
-              <label key={meta.lapId} className="lap-option external">
-                <input
-                  type="checkbox"
-                  checked={draftIds.includes(meta.lapId)}
-                  onChange={() => onToggleLap(meta.lapId)}
-                />
-                <div>
-                  <strong>{meta.playerName}</strong>
-                  <span>{formatLapTime(meta.lapTimeMs)}</span>
-                  <div className="lap-tags">
-                    <span className="tag">External</span>
-                    {referenceId === meta.lapId && <span className="tag">Ref</span>}
-                  </div>
-                </div>
-                <div className="lap-actions">
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => onSetReference(meta.lapId)}
-                  >
-                    Ref
-                  </button>
-                </div>
-              </label>
-            ))}
-          </div>
-          <div className="lap-panel-footer">
-            <button
-              type="button"
-              className="primary lap-panel-compare"
-              disabled={draftIds.length === 0}
-              onClick={onCompare}
-            >
-              Compare
-            </button>
-          </div>
-        </div>
-      )}
-
-      {!expanded && (
-        <div className="lap-panel-footer lap-panel-footer-collapsed">
+        <div className="lap-panel-footer">
           <button
             type="button"
-            className="lap-panel-compare"
+            className="primary lap-panel-compare"
             disabled={draftIds.length === 0}
             onClick={onCompare}
           >
             Compare
           </button>
         </div>
-      )}
+      </div>
     </div>
   );
 }

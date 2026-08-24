@@ -242,10 +242,46 @@ export function SessionReview() {
                           <span className="tag pinned review-inline-tag">★</span>
                         )}
                       </td>
-                      <td>{formatLapTime(lap.lap_time_ms)}</td>
-                      <td>{formatSectorMs(sectors.s1_ms)}</td>
-                      <td>{formatSectorMs(sectors.s2_ms)}</td>
-                      <td>{formatSectorMs(sectors.s3_ms)}</td>
+                      <td
+                        className={
+                          lapStats.bestLap?.id === lap.id ? "time-best" : undefined
+                        }
+                      >
+                        {formatLapTime(lap.lap_time_ms)}
+                      </td>
+                      <td
+                        className={
+                          sectors.s1_ms != null &&
+                          lapStats.bestS1Ms != null &&
+                          sectors.s1_ms === lapStats.bestS1Ms
+                            ? "time-best"
+                            : undefined
+                        }
+                      >
+                        {formatSectorMs(sectors.s1_ms)}
+                      </td>
+                      <td
+                        className={
+                          sectors.s2_ms != null &&
+                          lapStats.bestS2Ms != null &&
+                          sectors.s2_ms === lapStats.bestS2Ms
+                            ? "time-best"
+                            : undefined
+                        }
+                      >
+                        {formatSectorMs(sectors.s2_ms)}
+                      </td>
+                      <td
+                        className={
+                          sectors.s3_ms != null &&
+                          lapStats.bestS3Ms != null &&
+                          sectors.s3_ms === lapStats.bestS3Ms
+                            ? "time-best"
+                            : undefined
+                        }
+                      >
+                        {formatSectorMs(sectors.s3_ms)}
+                      </td>
                       <td
                         className={
                           deltaMs != null && deltaMs > 0

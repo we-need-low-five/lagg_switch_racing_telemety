@@ -1,18 +1,27 @@
 import { useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
+import { NavIcon, type NavIconId } from "./NavIcons";
 
 const HOVER_DELAY_MS = 120;
 
-const MAIN_NAV_ITEMS = [
-  { to: "/", end: true, label: "Sessions", icon: "🏁" },
-  { to: "/leaderboard", end: false, label: "Leaderboard", icon: "⏱" },
-  { to: "/compare", end: true, label: "Compare", icon: "📊" },
-  { to: "/fuel", end: false, label: "Fuel", icon: "⛽" },
-] as const;
+const MAIN_NAV_ITEMS: Array<{
+  to: string;
+  end: boolean;
+  label: string;
+  icon: NavIconId;
+}> = [
+  { to: "/", end: true, label: "Sessions", icon: "sessions" },
+  { to: "/leaderboard", end: false, label: "Leaderboard", icon: "leaderboard" },
+  { to: "/compare", end: true, label: "Compare", icon: "compare" },
+  { to: "/fuel", end: false, label: "Fuel", icon: "fuel" },
+];
 
-const BOTTOM_NAV_ITEMS = [
-  { to: "/settings", end: false, label: "Settings", icon: "🛠" },
-] as const;
+const BOTTOM_NAV_ITEMS: Array<{
+  to: string;
+  end: boolean;
+  label: string;
+  icon: NavIconId;
+}> = [{ to: "/settings", end: false, label: "Settings", icon: "settings" }];
 
 export function Sidebar() {
   const [hoverPreview, setHoverPreview] = useState(false);
@@ -55,7 +64,9 @@ export function Sidebar() {
             title={item.label}
             className="nav-item"
           >
-            <span className="nav-icon" aria-hidden>{item.icon}</span>
+            <span className="nav-icon" aria-hidden>
+              <NavIcon id={item.icon} />
+            </span>
             <span className="nav-label">{item.label}</span>
           </NavLink>
         ))}
@@ -70,7 +81,9 @@ export function Sidebar() {
             title={item.label}
             className="nav-item"
           >
-            <span className="nav-icon" aria-hidden>{item.icon}</span>
+            <span className="nav-icon" aria-hidden>
+              <NavIcon id={item.icon} />
+            </span>
             <span className="nav-label">{item.label}</span>
           </NavLink>
         ))}

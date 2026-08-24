@@ -28,6 +28,7 @@ const WIDTH = 420;
 const HEIGHT = 260;
 const PAD = 20;
 
+/** Map layout coords into the SVG viewBox, preserving aspect ratio. */
 function makeProjector(points: [number, number][]) {
   const xs = points.map((p) => p[0]);
   const ys = points.map((p) => p[1]);
@@ -37,10 +38,16 @@ function makeProjector(points: [number, number][]) {
   const maxY = Math.max(...ys);
   const spanX = maxX - minX || 1;
   const spanY = maxY - minY || 1;
+  const innerW = WIDTH - PAD * 2;
+  const innerH = HEIGHT - PAD * 2;
+  const scale = Math.min(innerW / spanX, innerH / spanY);
+  const offsetX = PAD + (innerW - spanX * scale) / 2;
+  const offsetY = PAD + (innerH - spanY * scale) / 2;
 
   return (x: number, y: number) => ({
-    x: PAD + ((x - minX) / spanX) * (WIDTH - PAD * 2),
-    y: HEIGHT - PAD - ((y - minY) / spanY) * (HEIGHT - PAD * 2),
+    x: offsetX + (x - minX) * scale,
+    // Flip Y so track north stays visually up in SVG space.
+    y: offsetY + (maxY - y) * scale,
   });
 }
 
@@ -48,6 +55,21 @@ function outlinePath(metrics: PathMetrics) {
   return metrics.points
     .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
     .join(" ");
+}
+
+/** Convert a mouse event into SVG viewBox coordinates (handles letterboxing). */
+function clientToSvgPoint(
+  svg: SVGSVGElement,
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } | null {
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  const local = pt.matrixTransform(ctm.inverse());
+  return { x: local.x, y: local.y };
 }
 
 export function TrackMap({
@@ -109,12 +131,16 @@ export function TrackMap({
     <div className="track-map">
       <svg
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        preserveAspectRatio="xMidYMid meet"
         onMouseMove={(e) => {
           if (!onCursorMove) return;
-          const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
-          const x = ((e.clientX - rect.left) / rect.width) * WIDTH;
-          const y = ((e.clientY - rect.top) / rect.height) * HEIGHT;
-          onCursorMove(metrics.pctAtSvg(x, y));
+          const local = clientToSvgPoint(
+            e.currentTarget as SVGSVGElement,
+            e.clientX,
+            e.clientY,
+          );
+          if (!local) return;
+          onCursorMove(metrics.pctAtSvg(local.x, local.y));
         }}
         onMouseLeave={() => onCursorMove?.(null)}
       >
