@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { getDataDir } from "../api";
+import { ColorPicker } from "../components/ColorPicker";
 import { GameSetupPanel } from "../components/GameSetupPanel";
 import {
   BACKGROUND_PRESETS,
+  type AppearancePrefs,
   type DeltaUnit,
   type FuelUnit,
   type PressureUnit,
@@ -12,6 +14,7 @@ import {
   type TempUnit,
   usePreferences,
 } from "../lib/preferences";
+import { lapAccentHex, resolveBackgroundBase } from "../lib/theme";
 
 type SettingsTab = "setup" | "units" | "appearance" | "general";
 
@@ -35,6 +38,13 @@ export function Settings() {
     const lapColors = [...prefs.appearance.lapColors];
     lapColors[index] = color;
     setPrefs({ appearance: { lapColors } });
+  }
+
+  function setBackground(patch: Partial<AppearancePrefs>) {
+    const next = { ...prefs.appearance, ...patch };
+    const lapColors = [...prefs.appearance.lapColors];
+    lapColors[0] = lapAccentHex(resolveBackgroundBase(next));
+    setPrefs({ appearance: { ...patch, lapColors } });
   }
 
   return (
@@ -202,46 +212,51 @@ export function Settings() {
                   style={{ background: color }}
                   title={id}
                   onClick={() =>
-                    setPrefs({
-                      appearance: {
-                        backgroundPreset: id,
-                        backgroundCustom: "",
-                      },
+                    setBackground({
+                      backgroundPreset: id,
+                      backgroundCustom: "",
                     })
                   }
                 />
               ))}
             </div>
-            <div className="form-row appearance-custom-row">
-              <label className="form-field">
+            <div
+              className={`color-picker-row ${prefs.appearance.backgroundCustom ? "selected" : ""}`}
+            >
+              <ColorPicker
+                value={
+                  prefs.appearance.backgroundCustom ||
+                  BACKGROUND_PRESETS[prefs.appearance.backgroundPreset]
+                }
+                onChange={(hex) =>
+                  setBackground({ backgroundCustom: hex })
+                }
+                aria-label="Custom color"
+              />
+              <span className="color-picker-copy">
                 <span className="form-label">Custom color</span>
-                <input
-                  type="color"
-                  value={
-                    prefs.appearance.backgroundCustom ||
-                    BACKGROUND_PRESETS[prefs.appearance.backgroundPreset]
-                  }
-                  onChange={(e) =>
-                    setPrefs({
-                      appearance: { backgroundCustom: e.target.value },
-                    })
-                  }
-                />
-              </label>
+                <span className="color-picker-hex">
+                  {prefs.appearance.backgroundCustom ||
+                    BACKGROUND_PRESETS[prefs.appearance.backgroundPreset]}
+                </span>
+              </span>
             </div>
 
             <h2>Lap series colors</h2>
             <p className="muted">Colors for compared laps in analysis charts.</p>
             <div className="color-editor-grid">
               {prefs.appearance.lapColors.map((color, i) => (
-                <label key={i} className="color-editor-item">
-                  <span>Lap {i + 1}</span>
-                  <input
-                    type="color"
+                <div key={i} className="color-editor-item">
+                  <span className="color-editor-copy">
+                    <span>Lap {i + 1}</span>
+                    <span className="color-picker-hex">{color}</span>
+                  </span>
+                  <ColorPicker
                     value={color}
-                    onChange={(e) => updateLapColor(i, e.target.value)}
+                    onChange={(hex) => updateLapColor(i, hex)}
+                    aria-label={`Lap ${i + 1} color`}
                   />
-                </label>
+                </div>
               ))}
             </div>
 

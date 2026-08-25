@@ -82,8 +82,9 @@ Installers are produced under `src-tauri/target/release/bundle/` (MSI and NSIS).
 
 Runtime data lives in `%LOCALAPPDATA%\SimTelemetry\`:
 
-- `simtelemetry.db` — session/lap metadata (SQLite)
+- `simtelemetry.db` — session/lap metadata and persistent leaderboard personal bests (SQLite)
 - `sessions/{session_id}/laps/{lap_id}.parquet` — distance-aligned lap samples
+- `leaderboard/laps/{id}.parquet` — copies of each driver's top 3 laps per track (kept if the source session is deleted)
 - `logs/` — application logs
 
 Portable export format: `.stb` (ZIP). See [docs/bundle-format.md](docs/bundle-format.md).

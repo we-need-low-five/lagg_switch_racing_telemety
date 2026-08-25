@@ -18,6 +18,10 @@ pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
 }
 
+pub fn leaderboard_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("leaderboard").join("laps")
+}
+
 fn dirs_or_local_app_data() -> PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(PathBuf::from)

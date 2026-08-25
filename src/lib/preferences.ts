@@ -42,19 +42,16 @@ export const DEFAULT_LAP_COLORS = [
 ];
 
 const DEFAULT_APPEARANCE: AppearancePrefs = {
-  backgroundPreset: "slate",
+  backgroundPreset: "forest",
   backgroundCustom: "",
   lapColors: [...DEFAULT_LAP_COLORS],
 };
 
 export const BACKGROUND_PRESETS: Record<string, string> = {
-  slate: "#020617",
-  midnight: "#0a0a0f",
-  charcoal: "#1a1a1a",
-  ocean: "#0c1929",
-  forest: "#0d1f17",
-  dusk: "#1e1b4b",
-  light: "#f1f5f9",
+  forest: "#1a2322",
+  charcoal: "#2b2b2b",
+  slate: "#292f38",
+  dusk: "#443b4a",
 };
 
 const DEFAULT_LAYOUT: LayoutPrefs = {

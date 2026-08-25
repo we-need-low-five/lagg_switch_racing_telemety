@@ -223,11 +223,21 @@ pub struct LeaderboardTrackOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderboardEntry {
     pub rank: u32,
+    /// 1, 2, or 3 among this player's kept laps on the track.
+    #[serde(default = "default_leaderboard_place")]
+    pub place: u32,
     pub player_name: String,
     pub lap_time_ms: u32,
     pub valid: bool,
     pub session_id: Uuid,
     pub lap_id: Uuid,
+    /// False when the source session was deleted; the time is still kept.
+    #[serde(default)]
+    pub session_exists: bool,
+}
+
+fn default_leaderboard_place() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +251,16 @@ pub struct TrackLapOption {
     pub car: String,
     pub started_at: DateTime<Utc>,
     pub sectors: SectorTimes,
+}
+
+/// Aggregated pace and fuel from recorded sessions. Survives session deletion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuelProfile {
+    pub game: GameId,
+    pub car: String,
+    pub track: String,
+    pub avg_lap_time_ms: Option<u32>,
+    pub avg_fuel_used_l: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

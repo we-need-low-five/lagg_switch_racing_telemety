@@ -5,7 +5,7 @@ import {
 } from "./preferences";
 import paletteRecipe from "./palette-recipe.json";
 
-type Hsl = { h: number; s: number; l: number };
+export type Hsl = { h: number; s: number; l: number };
 
 type SlotDelta = {
   dH: number;
@@ -49,7 +49,7 @@ function signedHueDelta(from: number, to: number): number {
   return round1(d);
 }
 
-function parseHex(input: string): string | null {
+export function parseHex(input: string): string | null {
   const trimmed = input.trim();
   const withHash = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
   const short = HEX3.exec(withHash);
@@ -79,7 +79,7 @@ function rgbToHex(r: number, g: number, b: number): string {
   return `#${to(r)}${to(g)}${to(b)}`;
 }
 
-function hexToHsl(hex: string): Hsl | null {
+export function hexToHsl(hex: string): Hsl | null {
   const rgb = hexToRgb(hex);
   if (!rgb) return null;
 
@@ -121,7 +121,7 @@ function hueToRgb(p: number, q: number, t: number): number {
   return p;
 }
 
-function hslToHex(hsl: Hsl): string {
+export function hslToHex(hsl: Hsl): string {
   const h = wrapHue(hsl.h) / 360;
   const s = clamp(hsl.s, 0, 100) / 100;
   const l = clamp(hsl.l, 0, 100) / 100;
@@ -363,11 +363,24 @@ export function buildThemePalette(seedHex: string): ThemePalette {
   };
 }
 
-export function resolveBackgroundBase(appearance: AppearancePrefs): string {
+export function resolveBackgroundBase(
+  appearance: Pick<AppearancePrefs, "backgroundPreset" | "backgroundCustom">,
+): string {
   if (appearance.backgroundCustom) {
     return appearance.backgroundCustom;
   }
-  return BACKGROUND_PRESETS[appearance.backgroundPreset] ?? BACKGROUND_PRESETS.slate;
+  return BACKGROUND_PRESETS[appearance.backgroundPreset] ?? BACKGROUND_PRESETS.forest;
+}
+
+/** Chart-friendly hex of the theme accent (same hue as `--link-color`). */
+export function lapAccentHex(seedHex: string): string {
+  const palette = buildThemePalette(seedHex);
+  const accentHsl = hexToHsl(palette.accent);
+  return hslToHex({
+    h: accentHsl?.h ?? palette.h,
+    s: Math.max(accentHsl?.s ?? 15, 50),
+    l: palette.scheme === "dark" ? 68 : 38,
+  });
 }
 
 export function hueFromAppearance(appearance: AppearancePrefs): number {

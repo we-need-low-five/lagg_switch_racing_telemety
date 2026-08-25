@@ -38,7 +38,8 @@ pub fn run() {
 
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir).expect("create data dir");
-    std::fs::create_dir_all(data_dir.join("sessions")).ok();
+    std::fs::create_dir_all(sim_storage::sessions_dir(&data_dir)).ok();
+    std::fs::create_dir_all(sim_storage::leaderboard_dir(&data_dir)).ok();
     std::fs::create_dir_all(data_dir.join("logs")).ok();
 
     let db = Arc::new(Mutex::new(
@@ -129,6 +130,7 @@ pub fn run() {
             commands::list_leaderboard_tracks,
             commands::get_leaderboard,
             commands::list_track_laps,
+            commands::list_fuel_profiles,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

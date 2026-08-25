@@ -207,7 +207,7 @@ export function Sessions() {
         title="Delete session?"
         message={
           pendingDelete
-            ? `Delete ${pendingDelete.track || "this session"} (${formatCarName(pendingDelete.car)}) and all its lap data? This cannot be undone.`
+            ? `Delete ${pendingDelete.track || "this session"} (${formatCarName(pendingDelete.car)}) and all its lap data? Your top 3 laps stay on the leaderboard. This cannot be undone.`
             : ""
         }
         confirmLabel={deleting ? "Deleting…" : "Delete"}

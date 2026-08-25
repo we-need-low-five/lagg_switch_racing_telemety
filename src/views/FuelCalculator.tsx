@@ -1,8 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { listFuelProfiles } from "../api";
+import { formatCarName } from "../lib/formatCarName";
 import {
   computeFuelPlan,
-  formatFuelLiters,
+  formatFuelLiters as formatPlanFuel,
+  lapTimePartsFromMs,
 } from "../lib/fuelCalc";
+import {
+  formatFuelLiters,
+  fuelUnitLabel,
+  usePreferences,
+} from "../lib/preferences";
+import type { FuelProfile } from "../types";
+import { formatLapTime, gameLabel } from "../types";
 
 function parseOptionalInt(value: string): number {
   if (value === "") return 0;
@@ -10,7 +20,12 @@ function parseOptionalInt(value: string): number {
   return Number.isFinite(n) ? n : NaN;
 }
 
+function profileKey(row: FuelProfile): string {
+  return `${row.game}|${row.car}|${row.track}`;
+}
+
 export function FuelCalculator() {
+  const [prefs] = usePreferences();
   const [hours, setHours] = useState("");
   const [minutes, setMinutes] = useState("");
   const [lapMinutes, setLapMinutes] = useState("");
@@ -18,6 +33,26 @@ export function FuelCalculator() {
   const [lapMilliseconds, setLapMilliseconds] = useState("");
   const [fuelPerLap, setFuelPerLap] = useState("");
   const [safetyMargin, setSafetyMargin] = useState(false);
+  const [profiles, setProfiles] = useState<FuelProfile[]>([]);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listFuelProfiles()
+      .then((rows) => {
+        if (!cancelled) {
+          setProfiles(rows);
+          setProfilesError(null);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setProfilesError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const result = useMemo(
     () =>
@@ -41,6 +76,19 @@ export function FuelCalculator() {
     minutes !== "" ||
     hasLapTimeInput ||
     fuelPerLap !== "";
+
+  function applyProfile(row: FuelProfile) {
+    setSelectedKey(profileKey(row));
+    if (row.avg_lap_time_ms != null) {
+      const parts = lapTimePartsFromMs(row.avg_lap_time_ms);
+      setLapMinutes(String(parts.minutes));
+      setLapSeconds(String(parts.seconds));
+      setLapMilliseconds(String(parts.milliseconds));
+    }
+    if (row.avg_fuel_used_l != null && Number.isFinite(row.avg_fuel_used_l)) {
+      setFuelPerLap(row.avg_fuel_used_l.toFixed(2));
+    }
+  }
 
   return (
     <div className="page">
@@ -161,22 +209,82 @@ export function FuelCalculator() {
                 </div>
                 <div className="fuel-result-row">
                   <dt>Base fuel</dt>
-                  <dd>{formatFuelLiters(result.baseFuelL)}</dd>
+                  <dd>{formatPlanFuel(result.baseFuelL)}</dd>
                 </div>
                 {safetyMargin && (
                   <div className="fuel-result-row">
                     <dt>Safety margin</dt>
-                    <dd>{formatFuelLiters(result.marginFuelL)}</dd>
+                    <dd>{formatPlanFuel(result.marginFuelL)}</dd>
                   </div>
                 )}
                 <div className="fuel-result-row fuel-result-total">
                   <dt>Total fuel</dt>
-                  <dd>{formatFuelLiters(result.totalFuelL)}</dd>
+                  <dd>{formatPlanFuel(result.totalFuelL)}</dd>
                 </div>
               </dl>
             )}
           </section>
         </div>
+
+        <section className="settings-panel fuel-calc-history">
+          <h2 className="fuel-calc-section-title">Known session averages</h2>
+          <p className="muted">Car and track averages from recorded sessions.</p>
+          {profilesError && <p className="error">{profilesError}</p>}
+          {!profilesError && profiles.length === 0 && (
+            <p className="muted">No session averages yet. Drive valid laps to populate this table.</p>
+          )}
+          {profiles.length > 0 && (
+            <div className="leaderboard-table-wrap">
+              <table className="leaderboard-table">
+                <thead>
+                  <tr>
+                    <th>Track</th>
+                    <th>Car</th>
+                    <th>Average lap time</th>
+                    <th>Average fuel usage</th>
+                    <th className="fuel-history-actions"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profiles.map((row) => {
+                    const key = profileKey(row);
+                    return (
+                      <tr
+                        key={key}
+                        className={`fuel-history-row ${selectedKey === key ? "is-selected" : ""}`}
+                      >
+                        <td>
+                          {row.track}
+                          <span className="fuel-history-game"> {gameLabel(row.game)}</span>
+                        </td>
+                        <td>{formatCarName(row.car)}</td>
+                        <td>
+                          {row.avg_lap_time_ms != null
+                            ? formatLapTime(row.avg_lap_time_ms)
+                            : "—"}
+                        </td>
+                        <td>
+                          {row.avg_fuel_used_l != null
+                            ? `${formatFuelLiters(row.avg_fuel_used_l, prefs.fuelUnit)} ${fuelUnitLabel(prefs.fuelUnit)}`
+                            : "—"}
+                        </td>
+                        <td className="fuel-history-actions">
+                          <button
+                            type="button"
+                            className="secondary fuel-history-fill"
+                            onClick={() => applyProfile(row)}
+                          >
+                            Autofill
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );

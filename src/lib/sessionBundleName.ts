@@ -33,11 +33,22 @@ function driverNamePart(playerName: string): string {
   return `${initial}_${last}`;
 }
 
-/** Suggested `.stb` filename: Game_Track_DD-MM-YYYY_I_LastName.stb */
+/** Lap time safe for Windows filenames (`1:23.456` → `1-23-456`). */
+function lapTimeFilePart(ms: number): string {
+  const minutes = Math.floor(ms / 60000);
+  const seconds = (ms % 60000) / 1000;
+  const sec = seconds.toFixed(3).padStart(6, "0").replace(".", "-");
+  return minutes > 0 ? `${minutes}-${sec}` : seconds.toFixed(3).replace(".", "-");
+}
+
+/** Suggested `.stb` filename: Game_Track_DD-MM-YYYY_I_LastName_1-23-456.stb */
 export function sessionBundleFileName(session: SessionRecord): string {
   const game = sanitizeFilePart(gameLabel(session.game), "Game");
   const track = sanitizeFilePart(session.track || "Unknown_track", "Unknown_track");
   const date = sessionDatePart(session.started_at);
   const driver = sanitizeFilePart(driverNamePart(session.player_name), "Unknown");
-  return `${game}_${track}_${date}_${driver}.stb`;
+  const best = session.best_lap_time_ms;
+  const timePart =
+    best != null && best > 0 ? `_${lapTimeFilePart(best)}` : "";
+  return `${game}_${track}_${date}_${driver}${timePart}.stb`;
 }

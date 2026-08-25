@@ -149,6 +149,7 @@ When adding a command: implement in `commands.rs`, register in `lib.rs`, add a t
 
 - Distance-aligned samples use `DISTANCE_GRID_POINTS = 4000` (`sim-core`).
 - Lap files are Parquet under `sessions/{session_id}/laps/{lap_id}.parquet`.
+- Personal bests (top 3 valid laps per player/track) live in SQLite `leaderboard_laps` plus copies under `leaderboard/laps/`; deleting a session must not remove those rows or files.
 - Portable export format is **`.stb`** (ZIP); see `docs/bundle-format.md` — bump/`bundle_version` carefully.
 - ACC is the **reference adapter**; port parity (validity, sectors, track naming) from ACC when improving other games.
 

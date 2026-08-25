@@ -9,6 +9,7 @@ import type {
   RecordingStatus,
   SessionRecord,
   TrackLapOption,
+  FuelProfile,
 } from "./types";
 import { gameIdFromRust } from "./types";
 
@@ -105,6 +106,14 @@ export async function getLeaderboard(
     trackId,
     trackName,
   });
+}
+
+export async function listFuelProfiles(): Promise<FuelProfile[]> {
+  const rows = await invoke<FuelProfile[]>("list_fuel_profiles");
+  return rows.map((row) => ({
+    ...row,
+    game: typeof row.game === "string" ? gameIdFromRust(row.game) : row.game,
+  }));
 }
 
 export async function listTrackLaps(

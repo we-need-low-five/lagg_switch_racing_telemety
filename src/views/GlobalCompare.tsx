@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   listLeaderboardGames,
   listLeaderboardTracks,
@@ -32,7 +33,15 @@ function parseTrackKey(key: string): { trackId: string; trackName: string } {
   };
 }
 
+interface GlobalCompareNavState {
+  game?: GameId;
+  trackKey?: string;
+  lapIds?: string[];
+}
+
 export function GlobalCompare() {
+  const location = useLocation();
+  const navState = (location.state as GlobalCompareNavState | null) ?? null;
   const [games, setGames] = useState<GameId[]>([]);
   const [tracks, setTracks] = useState<LeaderboardTrackOption[]>([]);
   const [trackLaps, setTrackLaps] = useState<Awaited<ReturnType<typeof listTrackLaps>>>([]);
@@ -56,6 +65,7 @@ export function GlobalCompare() {
       const rows = await listLeaderboardGames();
       setGames(rows);
       setSelectedGame((prev) => {
+        if (navState?.game && rows.includes(navState.game)) return navState.game;
         if (prev && rows.includes(prev)) return prev;
         return rows[0] ?? "";
       });
@@ -66,7 +76,7 @@ export function GlobalCompare() {
     } finally {
       setLoadingGames(false);
     }
-  }, []);
+  }, [navState?.game]);
 
   useEffect(() => {
     loadGames();
@@ -85,6 +95,9 @@ export function GlobalCompare() {
         setTracks(rows);
         const keys = rows.map(trackOptionKey);
         setSelectedTrackKey((prev) => {
+          if (navState?.trackKey && keys.includes(navState.trackKey)) {
+            return navState.trackKey;
+          }
           if (prev && keys.includes(prev)) return prev;
           return keys[0] ?? "";
         });
@@ -95,7 +108,7 @@ export function GlobalCompare() {
     return () => {
       cancelled = true;
     };
-  }, [selectedGame]);
+  }, [selectedGame, navState?.trackKey]);
 
   useEffect(() => {
     if (!selectedGame || !selectedTrackKey) {
@@ -141,6 +154,15 @@ export function GlobalCompare() {
         setTrackLaps(rows);
         const metas = rows.map((row) => trackLapOptionToMeta(row));
         setCatalogMetas(metas);
+        const ids = (navState?.lapIds ?? []).filter((id) =>
+          rows.some((row) => row.lap_id === id),
+        );
+        if (ids.length > 0) {
+          setDraftIds(ids);
+          setCompareIds(ids);
+          setReferenceId(ids[0]);
+          setPickerOpen(false);
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(String(e));
@@ -152,7 +174,7 @@ export function GlobalCompare() {
     return () => {
       cancelled = true;
     };
-  }, [selectedGame, selectedTrackKey]);
+  }, [selectedGame, selectedTrackKey, navState?.lapIds]);
 
   useEffect(() => {
     if (compareIds.length === 0) {
@@ -210,7 +232,8 @@ export function GlobalCompare() {
           <div>
             <h1>Compare</h1>
             <p className="subtitle">
-              Pick laps from any session on the same track.
+              Pick laps from any session or kept leaderboard telemetry on the
+              same track.
             </p>
           </div>
         </header>

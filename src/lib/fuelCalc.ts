@@ -31,6 +31,19 @@ export function lapTimeFromParts(
   return m * 60 + s + ms / 1000;
 }
 
+export function lapTimePartsFromMs(ms: number): {
+  minutes: number;
+  seconds: number;
+  milliseconds: number;
+} {
+  const clamped = Math.max(0, Math.round(ms));
+  return {
+    minutes: Math.floor(clamped / 60_000),
+    seconds: Math.floor((clamped % 60_000) / 1000),
+    milliseconds: clamped % 1000,
+  };
+}
+
 export function raceDurationSeconds(hours: number, minutes: number): number {
   const h = Number.isFinite(hours) ? Math.max(0, hours) : 0;
   const m = Number.isFinite(minutes) ? Math.max(0, minutes) : 0;

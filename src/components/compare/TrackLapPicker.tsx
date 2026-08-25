@@ -47,7 +47,8 @@ export function TrackLapPicker({
     <section className="settings-panel global-compare-picker">
       <h2 className="fuel-calc-section-title">Select laps</h2>
       <p className="muted small">
-        Choose up to {MAX_COMPARE_LAPS} valid laps on the same track.
+        Choose up to {MAX_COMPARE_LAPS} valid laps on the same track, including
+        leaderboard laps kept after a session is deleted.
       </p>
 
       <div className="leaderboard-filters">

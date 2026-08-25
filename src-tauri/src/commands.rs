@@ -1,6 +1,6 @@
 use crate::state::AppState;
 use sim_core::{
-    DistanceSample, GameId, GameSetupStatus, LapRecord, LeaderboardEntry,
+    DistanceSample, FuelProfile, GameId, GameSetupStatus, LapRecord, LeaderboardEntry,
     LeaderboardTrackOption, RecordingStatus, SessionRecord, TrackLapOption,
 };
 use sim_daemon::GameSetupProbe;
@@ -192,6 +192,17 @@ pub fn list_track_laps(
         .db
         .lock()
         .list_track_laps(game_id, &track_id, &track_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_fuel_profiles(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<FuelProfile>, String> {
+    state
+        .db
+        .lock()
+        .list_fuel_profiles()
         .map_err(|e| e.to_string())
 }
 

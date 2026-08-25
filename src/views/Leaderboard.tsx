@@ -103,7 +103,8 @@ export function Leaderboard() {
           <div>
             <h1>Leaderboard</h1>
             <p className="subtitle">
-              Best valid lap per player from your recorded and imported sessions.
+              Top 3 valid laps per player, with full telemetry kept for
+              comparison even if you delete the session.
             </p>
           </div>
         </header>
@@ -114,7 +115,10 @@ export function Leaderboard() {
         {!loading && games.length === 0 && (
           <div className="empty-state">
             <h2>No leaderboard data yet</h2>
-            <p>Record or import sessions with valid laps to see rankings.</p>
+            <p>
+              Record or import valid laps to see rankings. Your top 3 times stay
+              after you delete a session.
+            </p>
           </div>
         )}
 
@@ -167,18 +171,29 @@ export function Leaderboard() {
               </thead>
               <tbody>
                 {entries.map((entry) => (
-                  <tr
-                    key={`${entry.session_id}-${entry.lap_id}`}
-                    className="leaderboard-row"
-                    onClick={() => navigate(`/compare/${entry.session_id}`)}
-                  >
-                    <td>{entry.rank}</td>
-                    <td>{entry.player_name}</td>
-                    <td>{formatLapTime(entry.lap_time_ms)}</td>
-                    <td>
-                      <span className="tag">{entry.valid ? "Valid" : "Invalid"}</span>
-                    </td>
-                  </tr>
+                    <tr
+                      key={`${entry.session_id}-${entry.lap_id}`}
+                      className="leaderboard-row"
+                      onClick={() =>
+                        navigate("/compare", {
+                          state: {
+                            game: selectedGame,
+                            trackKey: selectedTrackKey,
+                            lapIds: [entry.lap_id],
+                          },
+                        })
+                      }
+                      title="Compare this lap"
+                    >
+                      <td>{entry.rank}</td>
+                      <td>{entry.player_name}</td>
+                      <td>{formatLapTime(entry.lap_time_ms)}</td>
+                      <td>
+                        <span className="tag">
+                          {entry.valid ? "Valid" : "Invalid"}
+                        </span>
+                      </td>
+                    </tr>
                 ))}
               </tbody>
             </table>

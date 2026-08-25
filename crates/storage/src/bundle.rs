@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sim_core::{LapRecord, SessionRecord};
+use sim_core::{LapRecord, LapSummary, SessionRecord};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -173,6 +173,19 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
                 channel_manifest,
             ],
         )?;
+        if lap.valid {
+            let summary = LapSummary {
+                lap_number: lap.lap_number,
+                lap_time_ms: lap.lap_time_ms,
+                valid: lap.valid,
+                sectors: lap.sectors,
+                tyre_compound: lap.tyre_compound,
+                tc_level: lap.tc_level,
+                abs_level: lap.abs_level,
+                fuel_used_l: lap.fuel_used_l,
+            };
+            db.consider_leaderboard_lap(session_id, new_lap_id, &summary, &rel)?;
+        }
     }
 
     db.finalize_session(session_id)?;

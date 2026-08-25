@@ -91,11 +91,13 @@ export interface LeaderboardTrackOption {
 
 export interface LeaderboardEntry {
   rank: number;
+  place?: number;
   player_name: string;
   lap_time_ms: number;
   valid: boolean;
   session_id: string;
   lap_id: string;
+  session_exists?: boolean;
 }
 
 export interface TrackLapOption {
@@ -108,6 +110,14 @@ export interface TrackLapOption {
   car: string;
   started_at: string;
   sectors: SectorTimes;
+}
+
+export interface FuelProfile {
+  game: GameId;
+  car: string;
+  track: string;
+  avg_lap_time_ms?: number | null;
+  avg_fuel_used_l?: number | null;
 }
 
 export function formatLapTime(ms: number): string {
