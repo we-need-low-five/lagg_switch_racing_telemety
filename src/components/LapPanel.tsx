@@ -33,6 +33,19 @@ function formatSectorMs(ms: number | null | undefined): string {
   return (ms / 1000).toFixed(3);
 }
 
+function formatDeltaMs(deltaMs: number | null): string {
+  if (deltaMs == null) return "—";
+  const sign = deltaMs > 0 ? "+" : "";
+  return `${sign}${(deltaMs / 1000).toFixed(3)}`;
+}
+
+function deltaClassName(deltaMs: number | null): string | undefined {
+  if (deltaMs == null) return undefined;
+  if (deltaMs > 0) return "delta-negative";
+  if (deltaMs < 0) return "delta-positive";
+  return undefined;
+}
+
 function isBestTime(
   value: number | null | undefined,
   best: number | null | undefined,
@@ -93,6 +106,7 @@ export function LapPanel({
                 <th>S1</th>
                 <th>S2</th>
                 <th>S3</th>
+                <th>Δ Best</th>
                 <th>Fuel ({fuelLabel})</th>
                 <th className="lap-select-actions" />
               </tr>
@@ -105,6 +119,13 @@ export function LapPanel({
                   game ?? undefined,
                 );
                 const checked = draftIds.includes(lap.id);
+                const bestLap = lapStats.bestLap;
+                const deltaMs =
+                  bestLap && lap.id !== bestLap.id
+                    ? lap.lap_time_ms - bestLap.lap_time_ms
+                    : lap.is_best || bestLap?.id === lap.id
+                      ? 0
+                      : null;
                 return (
                   <tr
                     key={lap.id}
@@ -173,6 +194,9 @@ export function LapPanel({
                     >
                       {formatSectorMs(sectors.s3_ms)}
                     </td>
+                    <td className={deltaClassName(deltaMs)}>
+                      {formatDeltaMs(deltaMs)}
+                    </td>
                     <td>{formatFuelLiters(lap.fuel_used_l, prefs.fuelUnit)}</td>
                     <td
                       className="lap-select-actions"
@@ -209,6 +233,11 @@ export function LapPanel({
                   game ?? undefined,
                 );
                 const checked = draftIds.includes(meta.lapId);
+                const bestLap = lapStats.bestLap;
+                const deltaMs =
+                  bestLap != null
+                    ? meta.lapTimeMs - bestLap.lap_time_ms
+                    : null;
                 return (
                   <tr
                     key={meta.lapId}
@@ -238,6 +267,9 @@ export function LapPanel({
                     <td>{formatSectorMs(sectors.s1_ms)}</td>
                     <td>{formatSectorMs(sectors.s2_ms)}</td>
                     <td>{formatSectorMs(sectors.s3_ms)}</td>
+                    <td className={deltaClassName(deltaMs)}>
+                      {formatDeltaMs(deltaMs)}
+                    </td>
                     <td>—</td>
                     <td
                       className="lap-select-actions"
