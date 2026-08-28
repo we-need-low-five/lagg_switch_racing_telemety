@@ -80,6 +80,7 @@ impl Database {
         self.backfill_leaderboard_if_empty()?;
         self.ensure_session_fuel_stats_table()?;
         self.backfill_session_fuel_stats()?;
+        self.prune_lapless_sessions()?;
         Ok(())
     }
 
@@ -253,6 +254,19 @@ impl Database {
             self.conn
                 .execute("ALTER TABLE laps ADD COLUMN stint_break_s INTEGER", [])?;
         }
+        Ok(())
+    }
+
+    /// Startup sweep for sessions that never recorded a lap. Runs before the
+    /// recorder starts, so any lapless session is a stale artifact (app killed
+    /// mid-menu, pre-gating track flips). Leaderboard/fuel-stats rows are only
+    /// written from real laps, so nothing of value is lost.
+    fn prune_lapless_sessions(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sessions
+             WHERE NOT EXISTS (SELECT 1 FROM laps WHERE laps.session_id = sessions.id)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -453,6 +467,15 @@ impl Database {
             "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
             params![Utc::now().to_rfc3339(), session_id.to_string()],
         )?;
+        // A session that never recorded a lap (menu navigation, a quick track
+        // switch, an abandoned load) is noise — drop it rather than leave a
+        // "0 laps" card. No FK references sessions(id) except laps.session_id,
+        // and there are none here.
+        self.conn.execute(
+            "DELETE FROM sessions
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM laps WHERE session_id = ?1)",
+            params![session_id.to_string()],
+        )?;
         Ok(())
     }
 
@@ -589,7 +612,10 @@ impl Database {
             "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name,
                     (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
                     (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
-             FROM sessions s ORDER BY s.started_at DESC",
+             FROM sessions s
+             WHERE s.ended_at IS NULL
+                OR EXISTS (SELECT 1 FROM laps l WHERE l.session_id = s.id)
+             ORDER BY s.started_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let game: String = row.get(1)?;
@@ -1580,5 +1606,56 @@ mod tests {
         assert_eq!(laps[1].id, second);
         assert_eq!(laps[1].stint, 2);
         assert_eq!(laps[1].stint_break_s, Some(420));
+    }
+
+    #[test]
+    fn finalize_drops_a_lapless_session() {
+        let (_dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro")
+            .unwrap();
+
+        db.finalize_session(session).unwrap();
+
+        assert!(
+            db.list_sessions().unwrap().is_empty(),
+            "an empty session should not survive finalize"
+        );
+        assert!(db.get_session(session).unwrap().is_none());
+    }
+
+    #[test]
+    fn finalize_keeps_a_session_that_recorded_a_lap() {
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "spa", "Spa", "Ferrari", "1.0", "Dmytro")
+            .unwrap();
+        insert_valid_lap(&db, dir.path(), session, 105_000, b"l1");
+
+        db.finalize_session(session).unwrap();
+
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, session);
+        assert!(sessions[0].ended_at.is_some());
+    }
+
+    #[test]
+    fn list_sessions_shows_the_live_lapless_session_but_startup_prunes_stale_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("simtelemetry.db");
+        let live = {
+            let db = Database::open(&db_path).unwrap();
+            let live = db
+                .create_session(GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro")
+                .unwrap();
+            // Unfinalized + lapless == the session currently recording.
+            assert_eq!(db.list_sessions().unwrap().len(), 1);
+            live
+        };
+        // Reopen: the startup sweep treats the now-orphaned lapless session as stale.
+        let db = Database::open(&db_path).unwrap();
+        assert!(db.list_sessions().unwrap().is_empty());
+        assert!(db.get_session(live).unwrap().is_none());
     }
 }
