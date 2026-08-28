@@ -148,7 +148,7 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
         };
 
         db.conn().execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 new_lap_id.to_string(),
                 session_id.to_string(),
@@ -162,6 +162,7 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
                 lap.tc_level,
                 lap.abs_level,
                 lap.fuel_used_l,
+                lap.stint.max(1),
             ],
         )?;
         db.conn().execute(

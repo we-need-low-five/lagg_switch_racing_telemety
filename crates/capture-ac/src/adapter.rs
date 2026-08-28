@@ -12,6 +12,8 @@ pub struct AcAdapter {
     statics: Option<SharedMemoryView<AcStatics>>,
     last_completed_laps: i32,
     session_announced: bool,
+    last_track_id: String,
+    last_packet_id: i32,
     sector_times: SectorTimes,
     last_sector_index: i32,
     current_lap_in_pit: bool,
@@ -25,6 +27,8 @@ impl AcAdapter {
             statics: None,
             last_completed_laps: -1,
             session_announced: false,
+            last_track_id: String::new(),
+            last_packet_id: -1,
             sector_times: SectorTimes {
                 s1_ms: None,
                 s2_ms: None,
@@ -72,15 +76,42 @@ impl GameAdapter for AcAdapter {
 
         if !self.session_announced {
             self.session_announced = true;
+            self.last_track_id = slugify_track_id(&statics.track_name());
+            self.last_packet_id = physics.packet_id;
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Ac,
-                track_id: slugify_track_id(&statics.track_name()),
+                track_id: self.last_track_id.clone(),
                 track: statics.track_name(),
                 car: statics.car_name(),
                 game_version: statics.game_version(),
                 player_name: statics.player_display(),
             });
         }
+
+        let track_id = slugify_track_id(&statics.track_name());
+        if !track_id.is_empty()
+            && !self.last_track_id.is_empty()
+            && !self.last_track_id.eq_ignore_ascii_case(&track_id)
+        {
+            self.last_track_id = track_id.clone();
+            self.last_completed_laps = -1;
+            self.last_packet_id = physics.packet_id;
+            self.last_sector_index = -1;
+            self.current_lap_in_pit = false;
+            return AdapterEvent::SessionInfo(SessionInfo {
+                game: GameId::Ac,
+                track_id,
+                track: statics.track_name(),
+                car: statics.car_name(),
+                game_version: statics.game_version(),
+                player_name: statics.player_display(),
+            });
+        }
+
+        if physics.packet_id == self.last_packet_id {
+            return AdapterEvent::Heartbeat;
+        }
+        self.last_packet_id = physics.packet_id;
 
         if self.last_completed_laps >= 0 && graphics.completed_laps > self.last_completed_laps {
             let lap_number = self.last_completed_laps + 1;

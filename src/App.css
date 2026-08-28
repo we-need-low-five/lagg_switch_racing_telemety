@@ -1616,8 +1616,33 @@ textarea {
   background: color-mix(in srgb, var(--border-color) 40%, transparent);
 }
 
-.review-row.invalid-lap td {
-  color: var(--color-negative);
+.review-row.invalid-lap td,
+.lap-select-table tbody tr.invalid-lap td {
+  color: var(--text-muted);
+}
+
+.stint-separator td {
+  padding: 0.45rem 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--border-color) 55%, transparent);
+  border-bottom: 1px solid var(--border-color);
+  cursor: default;
+}
+
+.lap-select-table tbody tr.stint-separator {
+  cursor: default;
+}
+
+.lap-select-table tbody tr.stint-separator:hover {
+  background: color-mix(in srgb, var(--border-color) 55%, transparent);
+}
+
+.lap-select-table tbody tr.stint-separator td {
+  padding: 0.35rem 0.45rem;
 }
 
 .time-best {

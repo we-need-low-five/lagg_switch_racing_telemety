@@ -17,6 +17,20 @@ pub trait GameAdapter: Send {
     fn is_active(&self) -> bool;
 }
 
+/// True when incoming telemetry is a different circuit than the open session.
+pub fn session_track_changed(current: &SessionInfo, incoming: &SessionInfo) -> bool {
+    let current_id = current.track_id.trim();
+    let incoming_id = incoming.track_id.trim();
+    if !current_id.is_empty() && !incoming_id.is_empty() {
+        return !current_id.eq_ignore_ascii_case(incoming_id);
+    }
+    let current_name = current.track.trim();
+    let incoming_name = incoming.track.trim();
+    !current_name.is_empty()
+        && !incoming_name.is_empty()
+        && !current_name.eq_ignore_ascii_case(incoming_name)
+}
+
 pub fn normalize_throttle(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
@@ -67,5 +81,44 @@ mod tests {
     #[test]
     fn keeps_skip_upshift() {
         assert_eq!(hold_transient_gear(4, 6), 6);
+    }
+
+    fn info(track_id: &str, track: &str) -> crate::schema::SessionInfo {
+        crate::schema::SessionInfo {
+            game: crate::schema::GameId::Acc,
+            track_id: track_id.to_string(),
+            track: track.to_string(),
+            car: "Ferrari".into(),
+            game_version: "1".into(),
+            player_name: "P".into(),
+        }
+    }
+
+    #[test]
+    fn detects_track_id_change() {
+        assert!(super::session_track_changed(
+            &info("monza", "Monza"),
+            &info("spa", "Spa"),
+        ));
+        assert!(!super::session_track_changed(
+            &info("monza", "Monza"),
+            &info("MONZA", "Monza"),
+        ));
+    }
+
+    #[test]
+    fn falls_back_to_track_name_when_ids_empty() {
+        assert!(super::session_track_changed(
+            &info("", "Monza"),
+            &info("", "Spa"),
+        ));
+        assert!(super::session_track_changed(
+            &info("monza", "Monza"),
+            &info("", "Spa"),
+        ));
+        assert!(!super::session_track_changed(
+            &info("monza", "Monza"),
+            &info("", "Monza"),
+        ));
     }
 }

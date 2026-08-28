@@ -73,6 +73,7 @@ impl Database {
         )?;
         self.ensure_track_id_column()?;
         self.ensure_lap_extras_columns()?;
+        self.ensure_lap_stint_column()?;
         self.ensure_leaderboard_table()?;
         self.sync_leaderboard_slots_if_needed()?;
         self.backfill_leaderboard_if_empty()?;
@@ -222,6 +223,21 @@ impl Database {
         }
         if !columns.iter().any(|c| c == "fuel_used_l") {
             self.conn.execute("ALTER TABLE laps ADD COLUMN fuel_used_l REAL", [])?;
+        }
+        Ok(())
+    }
+
+    fn ensure_lap_stint_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(laps)")?;
+        let has_stint = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "stint");
+        if !has_stint {
+            self.conn.execute(
+                "ALTER TABLE laps ADD COLUMN stint INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -466,6 +482,7 @@ impl Database {
             parquet_path,
             sample_rate_hz,
             channel_manifest_json,
+            1,
         )?;
         Ok(id)
     }
@@ -478,10 +495,12 @@ impl Database {
         parquet_path: &str,
         sample_rate_hz: f32,
         channel_manifest_json: &str,
+        stint: u32,
     ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
+        let stint = stint.max(1);
         self.conn.execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id.to_string(),
                 session_id.to_string(),
@@ -493,6 +512,7 @@ impl Database {
                 summary.tc_level,
                 summary.abs_level,
                 summary.fuel_used_l,
+                stint,
             ],
         )?;
         self.conn.execute(
@@ -582,11 +602,11 @@ impl Database {
 
     pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l
+            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint
              FROM laps l
              JOIN lap_files f ON f.lap_id = l.id
              WHERE l.session_id = ?1
-             ORDER BY l.lap_number ASC",
+             ORDER BY l.stint ASC, l.lap_number ASC",
         )?;
         let rows = stmt.query_map(params![session_id.to_string()], |row| {
             let sectors_json: String = row.get(7)?;
@@ -608,6 +628,10 @@ impl Database {
                 tc_level: row.get(10)?,
                 abs_level: row.get(11)?,
                 fuel_used_l: row.get(12)?,
+                stint: {
+                    let stint: i64 = row.get(13)?;
+                    stint.max(1) as u32
+                },
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -1249,7 +1273,7 @@ mod tests {
     ) -> Uuid {
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
-        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}")
+        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1)
             .unwrap();
         lap_id
     }
@@ -1266,7 +1290,7 @@ mod tests {
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
         let mut summary = summary(lap_time_ms, true);
         summary.fuel_used_l = Some(fuel_used_l);
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}")
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1)
             .unwrap();
         lap_id
     }
@@ -1325,7 +1349,7 @@ mod tests {
             .unwrap();
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(dir.path(), session, lap_id, b"inv");
-        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}")
+        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1)
             .unwrap();
 
         assert!(db.list_leaderboard_games().unwrap().is_empty());
@@ -1494,5 +1518,42 @@ mod tests {
         assert_eq!(rows[0].avg_lap_time_ms, Some(110_000));
         let fuel = rows[0].avg_fuel_used_l.expect("fuel average");
         assert!((fuel - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn stores_and_orders_laps_by_stint() {
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro")
+            .unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        db.insert_lap_with_id(
+            first,
+            session,
+            &summary(110_000, true),
+            &dummy_parquet(dir.path(), session, first, b"s1"),
+            100.0,
+            "{}",
+            1,
+        )
+        .unwrap();
+        db.insert_lap_with_id(
+            second,
+            session,
+            &summary(108_000, true),
+            &dummy_parquet(dir.path(), session, second, b"s2"),
+            100.0,
+            "{}",
+            2,
+        )
+        .unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(laps.len(), 2);
+        assert_eq!(laps[0].id, first);
+        assert_eq!(laps[0].stint, 1);
+        assert_eq!(laps[1].id, second);
+        assert_eq!(laps[1].stint, 2);
     }
 }

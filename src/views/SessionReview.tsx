@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { getSession, listLaps } from "../api";
 import { displaySectorTimes } from "../lib/compareLaps";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
+import { lapsWithStintSeparators } from "../lib/stints";
 import {
   formatFuelLiters,
   fuelUnitLabel,
@@ -202,7 +203,15 @@ export function SessionReview() {
                 </tr>
               </thead>
               <tbody>
-                {laps.map((lap) => {
+                {lapsWithStintSeparators(laps).map((row) => {
+                  if (row.kind === "separator") {
+                    return (
+                      <tr key={`stint-${row.stint}`} className="stint-separator">
+                        <td colSpan={11}>Stint {row.stint}</td>
+                      </tr>
+                    );
+                  }
+                  const lap = row.lap;
                   const sectors = displaySectorTimes(
                     lap.sectors,
                     lap.lap_time_ms,

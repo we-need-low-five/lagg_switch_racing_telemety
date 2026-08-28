@@ -34,6 +34,8 @@ export interface LapRecord {
   tc_level?: number | null;
   abs_level?: number | null;
   fuel_used_l?: number | null;
+  /** 1-based stint; omitted/legacy laps are treated as stint 1. */
+  stint?: number;
 }
 
 export interface DistanceSample {

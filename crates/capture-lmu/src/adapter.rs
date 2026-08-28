@@ -10,6 +10,7 @@ pub struct LmuAdapter {
     telemetry: Option<SharedMemoryView<LmuTelemetry>>,
     last_lap: i32,
     session_announced: bool,
+    last_track_id: String,
     sector_times: SectorTimes,
 }
 
@@ -19,6 +20,7 @@ impl LmuAdapter {
             telemetry: None,
             last_lap: -1,
             session_announced: false,
+            last_track_id: String::new(),
             sector_times: SectorTimes {
                 s1_ms: None,
                 s2_ms: None,
@@ -58,14 +60,35 @@ impl GameAdapter for LmuAdapter {
 
         let data = self.telemetry.as_ref().unwrap().read();
         if data.active == 0 {
+            if self.session_announced {
+                return AdapterEvent::Heartbeat;
+            }
             return AdapterEvent::Disconnected;
         }
 
+        let track_id = slugify_track_id(&data.track());
         if !self.session_announced {
             self.session_announced = true;
+            self.last_track_id = track_id.clone();
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Lmu,
-                track_id: slugify_track_id(&data.track()),
+                track_id,
+                track: data.track(),
+                car: data.vehicle(),
+                game_version: format!("LMU v{}", data.version),
+                player_name: data.player(),
+            });
+        }
+
+        if !track_id.is_empty()
+            && !self.last_track_id.is_empty()
+            && !self.last_track_id.eq_ignore_ascii_case(&track_id)
+        {
+            self.last_track_id = track_id.clone();
+            self.last_lap = -1;
+            return AdapterEvent::SessionInfo(SessionInfo {
+                game: GameId::Lmu,
+                track_id,
                 track: data.track(),
                 car: data.vehicle(),
                 game_version: format!("LMU v{}", data.version),

@@ -12,6 +12,7 @@ import {
   usePreferences,
 } from "../lib/preferences";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
+import { lapsWithStintSeparators } from "../lib/stints";
 
 interface LapPanelProps {
   laps: LapRecord[];
@@ -112,7 +113,19 @@ export function LapPanel({
               </tr>
             </thead>
             <tbody>
-              {laps.map((lap) => {
+              {lapsWithStintSeparators(laps).map((row) => {
+                if (row.kind === "separator") {
+                  return (
+                    <tr
+                      key={`stint-${row.stint}`}
+                      className="stint-separator"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <td colSpan={9}>Stint {row.stint}</td>
+                    </tr>
+                  );
+                }
+                const lap = row.lap;
                 const sectors = displaySectorTimes(
                   lap.sectors,
                   lap.lap_time_ms,

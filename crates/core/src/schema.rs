@@ -202,6 +202,9 @@ pub struct LapRecord {
     pub abs_level: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fuel_used_l: Option<f32>,
+    /// 1-based stint within the session. Gaps in live physics increment this.
+    #[serde(default = "default_stint")]
+    pub stint: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +240,10 @@ pub struct LeaderboardEntry {
 }
 
 fn default_leaderboard_place() -> u32 {
+    1
+}
+
+fn default_stint() -> u32 {
     1
 }
 

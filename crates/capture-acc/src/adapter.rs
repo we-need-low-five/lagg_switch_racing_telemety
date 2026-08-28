@@ -60,6 +60,8 @@ pub struct AccAdapter {
 
     session_announced: bool,
 
+    last_track_id: String,
+
     current_lap_valid: bool,
 
     current_lap_in_pit: bool,
@@ -105,6 +107,8 @@ impl AccAdapter {
             last_sector_index: -1,
 
             session_announced: false,
+
+            last_track_id: String::new(),
 
             current_lap_valid: true,
 
@@ -177,6 +181,8 @@ impl AccAdapter {
         self.statics_mapping = None;
 
         self.session_announced = false;
+
+        self.last_track_id.clear();
 
         self.last_completed_laps = -1;
 
@@ -357,6 +363,40 @@ impl AccAdapter {
 
 
 
+    fn reset_lap_progress(&mut self) {
+
+        self.last_completed_laps = -1;
+
+        self.last_physics_packet = -1;
+
+        self.last_sector_index = -1;
+
+        self.current_lap_valid = true;
+
+        self.current_lap_in_pit = false;
+
+        self.lap_start_compound = None;
+
+        self.lap_start_tc = None;
+
+        self.lap_start_abs = None;
+
+        self.lap_start_meta_captured = false;
+
+        self.sector_times = SectorTimes {
+
+            s1_ms: None,
+
+            s2_ms: None,
+
+            s3_ms: None,
+
+        };
+
+    }
+
+
+
     fn session_info(statics: &AccStaticsSnapshot) -> Option<SessionInfo> {
 
         let track = statics.track_name()?;
@@ -493,11 +533,59 @@ impl GameAdapter for AccAdapter {
 
             }
 
-            return AdapterEvent::SessionInfo(
+            let info = Self::session_info(&statics).expect("session_ready guarantees session info");
 
-                Self::session_info(&statics).expect("session_ready guarantees session info"),
+            self.last_track_id = info.track_id.clone();
 
-            );
+            return AdapterEvent::SessionInfo(info);
+
+        }
+
+
+
+        if let Some(info) = Self::session_info(&statics) {
+
+            if !self.last_track_id.is_empty()
+
+                && !info.track_id.trim().is_empty()
+
+                && !self.last_track_id.eq_ignore_ascii_case(&info.track_id)
+
+            {
+
+                self.reset_lap_progress();
+
+                self.last_track_id = info.track_id.clone();
+
+                return AdapterEvent::SessionInfo(info);
+
+            }
+
+        }
+
+
+
+        if !Self::session_ready(&graphics, &statics) {
+
+            self.reset_lap_progress();
+
+            return AdapterEvent::Heartbeat;
+
+        }
+
+
+
+        if self.last_completed_laps < 0 {
+
+            self.last_completed_laps = graphics.completed_lap;
+
+            self.last_sector_index = graphics.current_sector_index;
+
+            if let Ok(physics) = parse_physics_map(self.physics_reader.as_ref().unwrap()) {
+
+                self.last_physics_packet = physics.packet_id;
+
+            }
 
         }
 

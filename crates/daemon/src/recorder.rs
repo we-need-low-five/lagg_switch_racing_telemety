@@ -5,8 +5,8 @@ use sim_capture_ac::AcAdapter;
 use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
-    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, AdapterEvent,
-    GameAdapter, GameId, RecordingStatus, SessionInfo, TelemetrySample,
+    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, session_track_changed,
+    AdapterEvent, GameAdapter, GameId, RecordingStatus, SessionInfo, TelemetrySample,
 };
 use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::detect_running_game;
+
+const LIVE_PHYSICS_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn far_future() -> Instant {
+    Instant::now() + Duration::from_secs(365 * 24 * 3600)
+}
 
 pub struct RecordingService {
     db: Arc<Mutex<Database>>,
@@ -29,6 +35,9 @@ pub struct RecordingService {
     sample_rate_estimate: f32,
     session_info: Option<SessionInfo>,
     heartbeat_deadline: Instant,
+    current_stint: u32,
+    laps_in_current_stint: bool,
+    stint_gap_open: bool,
 }
 
 impl RecordingService {
@@ -45,8 +54,10 @@ impl RecordingService {
             last_tick: Instant::now(),
             sample_rate_estimate: 0.0,
             session_info: None,
-            // Far future until a session starts.
-            heartbeat_deadline: Instant::now() + Duration::from_secs(365 * 24 * 3600),
+            heartbeat_deadline: far_future(),
+            current_stint: 1,
+            laps_in_current_stint: false,
+            stint_gap_open: false,
         }
     }
 
@@ -59,19 +70,19 @@ impl RecordingService {
             }
         }
 
-        let Some(adapter) = self.adapter.as_mut() else {
-            return Ok(None);
-        };
-
-        // Silent game / frozen SHM: finalize like disconnect.
-        if self.session_id.is_some() && Instant::now() > self.heartbeat_deadline {
-            notification = Some(self.finalize_session_message());
-            self.reset_session_state();
-            self.adapter = None;
-            return Ok(notification);
+        if self.session_id.is_some()
+            && !self.stint_gap_open
+            && Instant::now() > self.heartbeat_deadline
+        {
+            self.open_stint_gap();
         }
 
-        let event = adapter.poll();
+        let event = {
+            let Some(adapter) = self.adapter.as_mut() else {
+                return Ok(None);
+            };
+            adapter.poll()
+        };
         match event {
             AdapterEvent::Disconnected => {
                 if self.session_id.is_some() {
@@ -81,53 +92,15 @@ impl RecordingService {
                 self.adapter = None;
             }
             AdapterEvent::SessionInfo(info) => {
-                if self.session_id.is_none() {
-                    if info.track.trim().is_empty() || info.car.trim().is_empty() {
-                        return Ok(notification);
-                    }
-                    let id = self.db.lock().create_session(
-                        info.game,
-                        &info.track_id,
-                        &info.track,
-                        &info.car,
-                        &info.game_version,
-                        &info.player_name,
-                    )?;
-                    self.session_id = Some(id);
-                    self.session_info = Some(info);
-                    self.paused = false;
-                    self.samples_recorded = 0;
-                    self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
-                    notification = Some(format!(
-                        "Recording {} — {} / {}",
-                        adapter.game_id().short_label(),
-                        self.session_info.as_ref().unwrap().track,
-                        self.session_info.as_ref().unwrap().car
-                    ));
-                } else if let Some(session_id) = self.session_id {
-                    let current = self.session_info.as_ref();
-                    let needs_update = current.is_none_or(|current| {
-                        current.track.trim().is_empty() && !info.track.trim().is_empty()
-                    });
-                    if needs_update {
-                        self.db.lock().update_session_metadata(
-                            session_id,
-                            &info.track_id,
-                            &info.track,
-                            &info.car,
-                            &info.game_version,
-                            &info.player_name,
-                        )?;
-                        self.session_info = Some(info);
-                    }
-                }
+                notification = self.handle_session_info(info)?;
             }
             AdapterEvent::LapStarted { lap_number } => {
+                self.mark_live_physics();
                 self.current_lap_number = lap_number;
                 self.current_lap_samples.clear();
-                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
             }
             AdapterEvent::LapCompleted(summary) => {
+                self.mark_live_physics();
                 if let Some(session_id) = self.session_id {
                     if self.flush_lap(session_id, &summary)? {
                         notification = Some(format!(
@@ -140,10 +113,9 @@ impl RecordingService {
                 }
                 self.current_lap_samples.clear();
                 self.current_lap_number = summary.lap_number + 1;
-                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
             }
             AdapterEvent::Telemetry(sample) => {
-                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
+                self.mark_live_physics();
                 if !self.paused {
                     self.current_lap_samples.push(sample);
                     self.samples_recorded += 1;
@@ -154,13 +126,92 @@ impl RecordingService {
                     self.last_tick = Instant::now();
                 }
             }
-            AdapterEvent::Heartbeat => {
-                self.heartbeat_deadline = Instant::now() + Duration::from_secs(30);
-            }
-            AdapterEvent::None => {}
+            AdapterEvent::Heartbeat | AdapterEvent::None => {}
         }
 
         Ok(notification)
+    }
+
+    fn handle_session_info(&mut self, info: SessionInfo) -> Result<Option<String>> {
+        if self.session_id.is_none() {
+            return self.start_session(info);
+        }
+
+        let track_changed = self
+            .session_info
+            .as_ref()
+            .is_some_and(|current| session_track_changed(current, &info));
+
+        if track_changed {
+            let _ = self.finalize_session_message();
+            self.reset_session_state();
+            return self.start_session(info);
+        }
+
+        if let Some(session_id) = self.session_id {
+            let current = self.session_info.as_ref();
+            let needs_update = current.is_none_or(|current| {
+                current.track.trim().is_empty() && !info.track.trim().is_empty()
+            });
+            if needs_update {
+                self.db.lock().update_session_metadata(
+                    session_id,
+                    &info.track_id,
+                    &info.track,
+                    &info.car,
+                    &info.game_version,
+                    &info.player_name,
+                )?;
+                self.session_info = Some(info);
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn start_session(&mut self, info: SessionInfo) -> Result<Option<String>> {
+        if info.track.trim().is_empty() || info.car.trim().is_empty() {
+            return Ok(None);
+        }
+        let id = self.db.lock().create_session(
+            info.game,
+            &info.track_id,
+            &info.track,
+            &info.car,
+            &info.game_version,
+            &info.player_name,
+        )?;
+        self.session_id = Some(id);
+        self.session_info = Some(info);
+        self.paused = false;
+        self.samples_recorded = 0;
+        self.current_stint = 1;
+        self.laps_in_current_stint = false;
+        self.stint_gap_open = false;
+        self.current_lap_samples.clear();
+        self.heartbeat_deadline = Instant::now() + LIVE_PHYSICS_TIMEOUT;
+        let session = self.session_info.as_ref().unwrap();
+        Ok(Some(format!(
+            "Recording {} — {} / {}",
+            session.game.short_label(),
+            session.track,
+            session.car
+        )))
+    }
+
+    fn mark_live_physics(&mut self) {
+        self.stint_gap_open = false;
+        self.heartbeat_deadline = Instant::now() + LIVE_PHYSICS_TIMEOUT;
+    }
+
+    fn open_stint_gap(&mut self) {
+        if self.laps_in_current_stint {
+            self.current_stint += 1;
+            self.laps_in_current_stint = false;
+        }
+        self.current_lap_samples.clear();
+        self.stint_gap_open = true;
+        self.heartbeat_deadline = far_future();
     }
 
     /// Returns true when a lap was persisted.
@@ -197,10 +248,12 @@ impl RecordingService {
             &rel,
             self.sample_rate_estimate,
             &manifest,
+            self.current_stint,
         ) {
             let _ = std::fs::remove_file(&abs);
             return Err(err);
         }
+        self.laps_in_current_stint = true;
         Ok(true)
     }
 
@@ -222,13 +275,17 @@ impl RecordingService {
         self.current_lap_samples.clear();
         self.current_lap_number = 1;
         self.paused = false;
-        self.heartbeat_deadline = Instant::now() + Duration::from_secs(365 * 24 * 3600);
+        self.heartbeat_deadline = far_future();
+        self.current_stint = 1;
+        self.laps_in_current_stint = false;
+        self.stint_gap_open = false;
     }
 
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         if !paused {
             self.heartbeat_deadline = Instant::now() + Duration::from_secs(5);
+            self.stint_gap_open = false;
         }
     }
 
