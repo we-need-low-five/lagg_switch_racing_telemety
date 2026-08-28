@@ -13,10 +13,32 @@ pub struct AcAdapter {
     last_completed_laps: i32,
     session_announced: bool,
     last_track_id: String,
+    last_car: String,
     last_packet_id: i32,
+    stale_packet_polls: u32,
     sector_times: SectorTimes,
     last_sector_index: i32,
     current_lap_in_pit: bool,
+}
+
+/// AC `graphics.status`: 0 OFF, 1 REPLAY, 2 LIVE, 3 PAUSE. We only treat LIVE
+/// as "on track" for session/track-change decisions.
+const AC_STATUS_LIVE: i32 = 2;
+
+/// Polls a frozen `packet_id` may persist before we assume telemetry is still
+/// live (some AC builds stop advancing packetId even while driving). ~90 ms at
+/// the 3 ms recorder poll.
+const STALE_PACKET_LIMIT: u32 = 30;
+
+fn ac_car_is_moving(physics: &AcPhysics) -> bool {
+    physics.speed_kmh > 0.5 || physics.gas > 0.01 || physics.brake > 0.01
+}
+
+/// A `packet_id` that has stopped advancing normally means "paused" — but if it
+/// stays frozen past the limit while the car is moving, the build just isn't
+/// advancing packetId and we should keep emitting telemetry.
+fn frozen_packet_still_live(stale_polls: u32, moving: bool) -> bool {
+    stale_polls >= STALE_PACKET_LIMIT && moving
 }
 
 impl AcAdapter {
@@ -28,7 +50,9 @@ impl AcAdapter {
             last_completed_laps: -1,
             session_announced: false,
             last_track_id: String::new(),
+            last_car: String::new(),
             last_packet_id: -1,
+            stale_packet_polls: 0,
             sector_times: SectorTimes {
                 s1_ms: None,
                 s2_ms: None,
@@ -75,41 +99,59 @@ impl GameAdapter for AcAdapter {
         let statics = self.statics.as_ref().unwrap().read();
 
         if !self.session_announced {
+            // Wait until the sim is on track — announcing from the menu/replay
+            // creates empty sessions and, on a later track load, a bogus split.
+            if graphics.status != AC_STATUS_LIVE {
+                return AdapterEvent::Heartbeat;
+            }
             self.session_announced = true;
             self.last_track_id = slugify_track_id(&statics.track_name());
+            self.last_car = statics.car_name();
             self.last_packet_id = physics.packet_id;
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Ac,
                 track_id: self.last_track_id.clone(),
                 track: statics.track_name(),
-                car: statics.car_name(),
+                car: self.last_car.clone(),
                 game_version: statics.game_version(),
                 player_name: statics.player_display(),
             });
         }
 
         let track_id = slugify_track_id(&statics.track_name());
-        if !track_id.is_empty()
+        let car = statics.car_name();
+        let track_changed = !track_id.is_empty()
             && !self.last_track_id.is_empty()
-            && !self.last_track_id.eq_ignore_ascii_case(&track_id)
-        {
+            && !self.last_track_id.eq_ignore_ascii_case(&track_id);
+        let car_changed = !car.trim().is_empty()
+            && !self.last_car.trim().is_empty()
+            && !self.last_car.eq_ignore_ascii_case(car.trim());
+        if graphics.status == AC_STATUS_LIVE && (track_changed || car_changed) {
             self.last_track_id = track_id.clone();
+            self.last_car = car.clone();
             self.last_completed_laps = -1;
             self.last_packet_id = physics.packet_id;
+            self.stale_packet_polls = 0;
             self.last_sector_index = -1;
             self.current_lap_in_pit = false;
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Ac,
                 track_id,
                 track: statics.track_name(),
-                car: statics.car_name(),
+                car,
                 game_version: statics.game_version(),
                 player_name: statics.player_display(),
             });
         }
 
         if physics.packet_id == self.last_packet_id {
-            return AdapterEvent::Heartbeat;
+            self.stale_packet_polls = self.stale_packet_polls.saturating_add(1);
+            if !frozen_packet_still_live(self.stale_packet_polls, ac_car_is_moving(&physics)) {
+                return AdapterEvent::Heartbeat;
+            }
+            // packetId is frozen but the car is clearly live — keep recording.
+        } else {
+            self.stale_packet_polls = 0;
         }
         self.last_packet_id = physics.packet_id;
 
@@ -223,4 +265,53 @@ fn slugify_track_id(track: &str) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stationary_physics() -> AcPhysics {
+        // AcPhysics is `#[repr(C)]` POD; an all-zero frame is a valid parked car.
+        unsafe { std::mem::zeroed() }
+    }
+
+    #[test]
+    fn stationary_frame_is_not_moving() {
+        assert!(!ac_car_is_moving(&stationary_physics()));
+    }
+
+    #[test]
+    fn throttle_brake_or_speed_counts_as_moving() {
+        let mut p = stationary_physics();
+        p.speed_kmh = 12.0;
+        assert!(ac_car_is_moving(&p));
+
+        let mut p = stationary_physics();
+        p.gas = 0.2;
+        assert!(ac_car_is_moving(&p));
+
+        let mut p = stationary_physics();
+        p.brake = 0.5;
+        assert!(ac_car_is_moving(&p));
+    }
+
+    #[test]
+    fn frozen_packet_is_paused_until_limit_then_live_only_if_moving() {
+        assert!(!frozen_packet_still_live(1, true), "brief freeze = paused");
+        assert!(
+            !frozen_packet_still_live(STALE_PACKET_LIMIT, false),
+            "long freeze while parked stays paused"
+        );
+        assert!(
+            frozen_packet_still_live(STALE_PACKET_LIMIT, true),
+            "long freeze while moving = keep recording"
+        );
+    }
+
+    #[test]
+    fn slugify_track_id_normalizes() {
+        assert_eq!(slugify_track_id("  Spa-Francorchamps "), "spafrancorchamps");
+        assert_eq!(slugify_track_id("ks_monza"), "ks_monza");
+    }
 }

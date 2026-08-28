@@ -62,6 +62,8 @@ pub struct AccAdapter {
 
     last_track_id: String,
 
+    last_car: String,
+
     current_lap_valid: bool,
 
     current_lap_in_pit: bool,
@@ -109,6 +111,8 @@ impl AccAdapter {
             session_announced: false,
 
             last_track_id: String::new(),
+
+            last_car: String::new(),
 
             current_lap_valid: true,
 
@@ -183,6 +187,8 @@ impl AccAdapter {
         self.session_announced = false;
 
         self.last_track_id.clear();
+
+        self.last_car.clear();
 
         self.last_completed_laps = -1;
 
@@ -537,29 +543,9 @@ impl GameAdapter for AccAdapter {
 
             self.last_track_id = info.track_id.clone();
 
+            self.last_car = info.car.clone();
+
             return AdapterEvent::SessionInfo(info);
-
-        }
-
-
-
-        if let Some(info) = Self::session_info(&statics) {
-
-            if !self.last_track_id.is_empty()
-
-                && !info.track_id.trim().is_empty()
-
-                && !self.last_track_id.eq_ignore_ascii_case(&info.track_id)
-
-            {
-
-                self.reset_lap_progress();
-
-                self.last_track_id = info.track_id.clone();
-
-                return AdapterEvent::SessionInfo(info);
-
-            }
 
         }
 
@@ -570,6 +556,40 @@ impl GameAdapter for AccAdapter {
             self.reset_lap_progress();
 
             return AdapterEvent::Heartbeat;
+
+        }
+
+
+
+        // Only treat a track_id / car change as a real session boundary while
+        // the sim is actually on track. Menu navigation flips statics fields
+        // without a live session and must not spawn empty sessions downstream.
+
+        if let Some(info) = Self::session_info(&statics) {
+
+            let track_changed = !self.last_track_id.is_empty()
+
+                && !info.track_id.trim().is_empty()
+
+                && !self.last_track_id.eq_ignore_ascii_case(&info.track_id);
+
+            let car_changed = !self.last_car.is_empty()
+
+                && !info.car.trim().is_empty()
+
+                && !self.last_car.eq_ignore_ascii_case(info.car.trim());
+
+            if track_changed || car_changed {
+
+                self.reset_lap_progress();
+
+                self.last_track_id = info.track_id.clone();
+
+                self.last_car = info.car.clone();
+
+                return AdapterEvent::SessionInfo(info);
+
+            }
 
         }
 

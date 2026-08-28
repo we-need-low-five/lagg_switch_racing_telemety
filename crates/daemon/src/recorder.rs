@@ -5,8 +5,9 @@ use sim_capture_ac::AcAdapter;
 use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
-    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, session_track_changed,
-    AdapterEvent, GameAdapter, GameId, RecordingStatus, SessionInfo, TelemetrySample,
+    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, session_car_changed,
+    session_track_changed, AdapterEvent, GameAdapter, GameId, RecordingStatus, SessionInfo,
+    TelemetrySample,
 };
 use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
@@ -170,12 +171,11 @@ impl RecordingService {
             return self.start_session(info);
         }
 
-        let track_changed = self
-            .session_info
-            .as_ref()
-            .is_some_and(|current| session_track_changed(current, &info));
+        let boundary_changed = self.session_info.as_ref().is_some_and(|current| {
+            session_track_changed(current, &info) || session_car_changed(current, &info)
+        });
 
-        if track_changed {
+        if boundary_changed {
             let _ = self.finalize_session_message();
             self.reset_session_state();
             return self.start_session(info);
@@ -455,11 +455,15 @@ mod tests {
     }
 
     fn session_info(track_id: &str, track: &str) -> SessionInfo {
+        session_info_car(track_id, track, "Ferrari 296 GT3")
+    }
+
+    fn session_info_car(track_id: &str, track: &str, car: &str) -> SessionInfo {
         SessionInfo {
             game: GameId::Acc,
             track_id: track_id.to_string(),
             track: track.to_string(),
-            car: "Ferrari 296 GT3".to_string(),
+            car: car.to_string(),
             game_version: "1.0".to_string(),
             player_name: "Tester".to_string(),
         }
@@ -559,6 +563,34 @@ mod tests {
             assert_eq!(laps.len(), 1);
             assert_eq!(laps[0].stint, 1, "each fresh session starts at stint 1");
         }
+        drop(dir);
+    }
+
+    #[test]
+    fn car_change_on_same_track_starts_new_session() {
+        let mut events = vec![AdapterEvent::SessionInfo(session_info_car(
+            "monza", "Monza", "Ferrari 296 GT3",
+        ))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        events.push(AdapterEvent::SessionInfo(session_info_car(
+            "monza", "Monza", "Porsche 992 GT3 R",
+        )));
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2, "car swap should open a second session");
+        let cars: Vec<_> = sessions.iter().map(|s| s.car.as_str()).collect();
+        assert!(cars.contains(&"Ferrari 296 GT3"));
+        assert!(cars.contains(&"Porsche 992 GT3 R"));
+        for session in &sessions {
+            assert_eq!(svc.db.lock().list_laps(session.id).unwrap()[0].stint, 1);
+        }
+        assert_eq!(svc.current_stint, 1);
         drop(dir);
     }
 

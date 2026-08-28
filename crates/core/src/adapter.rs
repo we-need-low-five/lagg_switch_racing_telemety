@@ -31,6 +31,14 @@ pub fn session_track_changed(current: &SessionInfo, incoming: &SessionInfo) -> b
         && !current_name.eq_ignore_ascii_case(incoming_name)
 }
 
+/// True when incoming telemetry reports a different car than the open session.
+/// Both sides must be known — a blank car never triggers a new session.
+pub fn session_car_changed(current: &SessionInfo, incoming: &SessionInfo) -> bool {
+    let a = current.car.trim();
+    let b = incoming.car.trim();
+    !a.is_empty() && !b.is_empty() && !a.eq_ignore_ascii_case(b)
+}
+
 pub fn normalize_throttle(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
@@ -120,5 +128,30 @@ mod tests {
             &info("monza", "Monza"),
             &info("", "Monza"),
         ));
+    }
+
+    fn with_car(car: &str) -> crate::schema::SessionInfo {
+        crate::schema::SessionInfo {
+            car: car.to_string(),
+            ..info("monza", "Monza")
+        }
+    }
+
+    #[test]
+    fn detects_car_change() {
+        assert!(super::session_car_changed(
+            &with_car("Ferrari 296 GT3"),
+            &with_car("Porsche 992 GT3 R"),
+        ));
+        assert!(!super::session_car_changed(
+            &with_car("Ferrari 296 GT3"),
+            &with_car("ferrari 296 gt3"),
+        ));
+    }
+
+    #[test]
+    fn car_change_needs_both_sides_known() {
+        assert!(!super::session_car_changed(&with_car(""), &with_car("Porsche")));
+        assert!(!super::session_car_changed(&with_car("Ferrari"), &with_car("  ")));
     }
 }
