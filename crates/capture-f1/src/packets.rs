@@ -74,9 +74,15 @@ pub struct LapData {
     pub speed_trap_fastest_lap: u8,
 }
 
+pub const PACKET_ID_MOTION: u8 = 0;
+pub const PACKET_ID_SESSION: u8 = 1;
 pub const PACKET_ID_LAP_DATA: u8 = 2;
 pub const PACKET_ID_TELEMETRY: u8 = 6;
-pub const PACKET_ID_MOTION: u8 = 0;
+
+/// Byte offset of `trackId` (int8) inside a `PacketSessionData`, measured from
+/// the start of the packet: header + weather(1) + trackTemp(1) + airTemp(1) +
+/// totalLaps(1) + trackLength(2) + sessionType(1). Stable across F1 23–25.
+pub const SESSION_TRACK_ID_OFFSET: usize = 7;
 
 pub fn sector_ms(ms_part: u16, min_part: u8) -> u32 {
     ms_part as u32 + (min_part as u32) * 60_000

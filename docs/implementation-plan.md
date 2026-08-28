@@ -153,13 +153,13 @@ Each non-ACC adapter needs the same categories of work ACC received. Status belo
 | Category | Status | Required work |
 |----------|--------|----------------|
 | Telemetry | UDP packets | Verify packet types, motion vs telemetry timing, lap/time fields |
-| Session metadata | Placeholder | Parse real track name, car, player from UDP session/motion packets |
-| `track_id` | Empty string | Map F1 track id → canonical layout id |
+| Session metadata | Track parsed from session packet (`trackId`); car/player still placeholder | Parse car/player from the participants packet |
+| `track_id` | Slug from `F1_TRACKS` table (`trackId` → slug); empty for unknown ids | Reconcile slugs with bundled layout ids |
 | Position | Motion packet | Confirm coordinates and distance for resampling |
 | Lap validity | `current_lap_invalid` | Extend with pit/sector rules as available |
 | Sector times | Not wired | Parse sector times from lap data packet |
 | Track layouts | None bundled | F1 calendar circuits — new layout set or shared geo sources |
-| Tests | None | UDP fixture replay tests |
+| Tests | `trackId` parse + lookup unit tests | UDP fixture replay tests for lap/telemetry flow |
 
 ---
 

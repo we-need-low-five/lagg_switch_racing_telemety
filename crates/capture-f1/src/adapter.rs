@@ -1,6 +1,6 @@
 use crate::packets::{
     sector_ms, CarTelemetryData, LapData, PacketHeader, DEFAULT_PORT, PACKET_ID_LAP_DATA,
-    PACKET_ID_MOTION, PACKET_ID_TELEMETRY,
+    PACKET_ID_MOTION, PACKET_ID_SESSION, PACKET_ID_TELEMETRY, SESSION_TRACK_ID_OFFSET,
 };
 use chrono::Utc;
 use sim_core::{
@@ -30,11 +30,63 @@ pub struct F1Adapter {
     /// Latched from the lap that just finished (not the new current lap).
     completed_lap_invalid: u8,
     session_announced: bool,
+    /// Slug of the announced track, for detecting a mid-session track change.
+    last_track_id: String,
+    /// `(slug, display)` from the most recent session packet, if a known id.
+    parsed_track: Option<(String, String)>,
     latest_lap: Option<LapData>,
     latest_telemetry: Option<CarTelemetryData>,
     latest_motion: Option<(f32, f32, f32)>,
     sector_times: SectorTimes,
     port: u16,
+}
+
+/// F1 25 UDP `trackId` → (slug, display name). Unknown / `-1` ids fall back to
+/// the generic label so recording still works.
+const F1_TRACKS: &[(i8, &str, &str)] = &[
+    (0, "melbourne", "Melbourne"),
+    (1, "paul_ricard", "Paul Ricard"),
+    (2, "shanghai", "Shanghai"),
+    (3, "sakhir", "Sakhir (Bahrain)"),
+    (4, "catalunya", "Catalunya"),
+    (5, "monaco", "Monaco"),
+    (6, "montreal", "Montreal"),
+    (7, "silverstone", "Silverstone"),
+    (8, "hockenheim", "Hockenheim"),
+    (9, "hungaroring", "Hungaroring"),
+    (10, "spa", "Spa-Francorchamps"),
+    (11, "monza", "Monza"),
+    (12, "singapore", "Singapore"),
+    (13, "suzuka", "Suzuka"),
+    (14, "abu_dhabi", "Abu Dhabi"),
+    (15, "cota", "Circuit of the Americas"),
+    (16, "interlagos", "Interlagos"),
+    (17, "red_bull_ring", "Red Bull Ring"),
+    (18, "sochi", "Sochi"),
+    (19, "mexico", "Mexico City"),
+    (20, "baku", "Baku"),
+    (21, "sakhir_short", "Sakhir Short"),
+    (22, "silverstone_short", "Silverstone Short"),
+    (23, "cota_short", "COTA Short"),
+    (24, "suzuka_short", "Suzuka Short"),
+    (25, "hanoi", "Hanoi"),
+    (26, "zandvoort", "Zandvoort"),
+    (27, "imola", "Imola"),
+    (28, "portimao", "Portimão"),
+    (29, "jeddah", "Jeddah"),
+    (30, "miami", "Miami"),
+    (31, "las_vegas", "Las Vegas"),
+    (32, "losail", "Losail (Qatar)"),
+    (33, "silverstone_reverse", "Silverstone (Reverse)"),
+    (34, "red_bull_ring_reverse", "Red Bull Ring (Reverse)"),
+    (35, "zandvoort_reverse", "Zandvoort (Reverse)"),
+];
+
+fn f1_track(track_id: i8) -> Option<(&'static str, &'static str)> {
+    F1_TRACKS
+        .iter()
+        .find(|(id, _, _)| *id == track_id)
+        .map(|(_, slug, display)| (*slug, *display))
 }
 
 impl F1Adapter {
@@ -49,6 +101,8 @@ impl F1Adapter {
             last_lap_num: 0,
             completed_lap_invalid: 0,
             session_announced: false,
+            last_track_id: String::new(),
+            parsed_track: None,
             latest_lap: None,
             latest_telemetry: None,
             latest_motion: None,
@@ -100,6 +154,7 @@ impl F1Adapter {
             self.player_index = header.player_car_index;
             match header.packet_id {
                 PACKET_ID_MOTION => self.parse_motion(slice, len),
+                PACKET_ID_SESSION => self.parse_session(slice, len),
                 PACKET_ID_LAP_DATA => self.parse_lap_data(slice, len),
                 PACKET_ID_TELEMETRY => self.parse_telemetry(slice, len),
                 _ => {}
@@ -119,6 +174,37 @@ impl F1Adapter {
                 motion.world_position_y,
                 motion.world_position_z,
             ));
+        }
+    }
+
+    fn parse_session(&mut self, buf: &[u8], len: usize) {
+        let offset = size_of::<PacketHeader>() + SESSION_TRACK_ID_OFFSET;
+        if offset >= len {
+            return;
+        }
+        let track_id = buf[offset] as i8;
+        if let Some((slug, display)) = f1_track(track_id) {
+            self.parsed_track = Some((slug.to_string(), display.to_string()));
+        }
+        // Unknown / -1 id: keep whatever we had (falls back to the placeholder).
+    }
+
+    /// `(track_id slug, display name)` — empty slug + generic name until a
+    /// session packet with a known track id has been seen.
+    fn current_track(&self) -> (String, String) {
+        self.parsed_track
+            .clone()
+            .unwrap_or_else(|| (String::new(), "F1 25 Session".to_string()))
+    }
+
+    fn session_info(track_id: String, track: String) -> SessionInfo {
+        SessionInfo {
+            game: GameId::F1_25,
+            track_id,
+            track,
+            car: "Player Car".to_string(),
+            game_version: "F1 25".to_string(),
+            player_name: "Player".to_string(),
         }
     }
 
@@ -184,16 +270,27 @@ impl GameAdapter for F1Adapter {
             return AdapterEvent::Disconnected;
         };
 
+        let (track_id, track_name) = self.current_track();
+
         if !self.session_announced {
             self.session_announced = true;
-            return AdapterEvent::SessionInfo(SessionInfo {
-                game: GameId::F1_25,
-                track_id: String::new(),
-                track: "F1 25 Session".to_string(),
-                car: "Player Car".to_string(),
-                game_version: "F1 25".to_string(),
-                player_name: "Player".to_string(),
-            });
+            self.last_track_id = track_id.clone();
+            return AdapterEvent::SessionInfo(Self::session_info(track_id, track_name));
+        }
+
+        // Re-announce once the real track becomes known (announced with the
+        // placeholder), or when the player switches track mid-run. The stale
+        // placeholder session, if any, is lapless and gets pruned.
+        if !track_id.is_empty() && !self.last_track_id.eq_ignore_ascii_case(&track_id) {
+            self.last_track_id = track_id.clone();
+            self.last_lap_num = 0;
+            self.completed_lap_invalid = 0;
+            self.sector_times = SectorTimes {
+                s1_ms: None,
+                s2_ms: None,
+                s3_ms: None,
+            };
+            return AdapterEvent::SessionInfo(Self::session_info(track_id, track_name));
         }
 
         if self.last_lap_num > 0 && lap.current_lap_num > self.last_lap_num {
@@ -307,5 +404,52 @@ fn read_unaligned<T: Copy>(bytes: &[u8]) -> T {
             size_of::<T>(),
         );
         value.assume_init()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_packet(track_id: i8) -> Vec<u8> {
+        let mut buf = vec![0u8; size_of::<PacketHeader>() + SESSION_TRACK_ID_OFFSET + 1];
+        let last = buf.len() - 1;
+        buf[last] = track_id as u8;
+        buf
+    }
+
+    #[test]
+    fn f1_track_lookup_known_and_unknown() {
+        assert_eq!(f1_track(11), Some(("monza", "Monza")));
+        assert_eq!(f1_track(0), Some(("melbourne", "Melbourne")));
+        assert_eq!(f1_track(-1), None);
+        assert_eq!(f1_track(120), None);
+    }
+
+    #[test]
+    fn parse_session_tracks_and_updates_the_circuit() {
+        let mut a = F1Adapter::new();
+        assert_eq!(a.current_track(), (String::new(), "F1 25 Session".into()));
+
+        let monza = session_packet(11);
+        a.parse_session(&monza, monza.len());
+        assert_eq!(a.current_track(), ("monza".into(), "Monza".into()));
+
+        let spa = session_packet(10);
+        a.parse_session(&spa, spa.len());
+        assert_eq!(a.current_track(), ("spa".into(), "Spa-Francorchamps".into()));
+
+        // Unknown id keeps the last known circuit rather than dropping to placeholder.
+        let unknown = session_packet(-1);
+        a.parse_session(&unknown, unknown.len());
+        assert_eq!(a.current_track(), ("spa".into(), "Spa-Francorchamps".into()));
+    }
+
+    #[test]
+    fn parse_session_ignores_a_truncated_packet() {
+        let mut a = F1Adapter::new();
+        let short = vec![0u8; size_of::<PacketHeader>()];
+        a.parse_session(&short, short.len());
+        assert_eq!(a.current_track(), (String::new(), "F1 25 Session".into()));
     }
 }
