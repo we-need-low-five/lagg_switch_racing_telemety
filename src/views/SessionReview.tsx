@@ -2,8 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getSession, listLaps } from "../api";
 import { displaySectorTimes } from "../lib/compareLaps";
-import { computeSessionLapStats } from "../lib/sessionLapStats";
-import { lapsWithStintSeparators } from "../lib/stints";
+import {
+  computeSessionLapStats,
+  computeStintStatsMap,
+} from "../lib/sessionLapStats";
+import {
+  formatStintBreak,
+  lapStint,
+  lapsWithStintSeparators,
+  sessionHasMultipleStints,
+} from "../lib/stints";
 import {
   formatFuelLiters,
   fuelUnitLabel,
@@ -57,6 +65,11 @@ export function SessionReview() {
   const bestLap = useMemo(
     () => laps.find((l) => l.is_best) ?? laps[0],
     [laps],
+  );
+  const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
+  const stintStats = useMemo(
+    () => computeStintStatsMap(laps, session?.game),
+    [laps, session?.game],
   );
 
   const lapStats = useMemo(
@@ -205,9 +218,28 @@ export function SessionReview() {
               <tbody>
                 {lapsWithStintSeparators(laps).map((row) => {
                   if (row.kind === "separator") {
+                    const st = stintStats.get(row.stint);
                     return (
                       <tr key={`stint-${row.stint}`} className="stint-separator">
-                        <td colSpan={11}>Stint {row.stint}</td>
+                        <td colSpan={11}>
+                          Stint {row.stint}
+                          {st && (
+                            <span className="stint-break">
+                              {" "}
+                              · {st.lapCount} lap{st.lapCount !== 1 ? "s" : ""}
+                              {st.best.bestLap &&
+                                ` · best ${formatLapTime(st.best.bestLap.lap_time_ms)}`}
+                              {st.best.averageValidLapMs != null &&
+                                ` · avg ${formatLapTime(st.best.averageValidLapMs)}`}
+                            </span>
+                          )}
+                          {row.breakS != null && (
+                            <span className="stint-break">
+                              {" "}
+                              · {formatStintBreak(row.breakS)} break
+                            </span>
+                          )}
+                        </td>
                       </tr>
                     );
                   }
@@ -243,7 +275,9 @@ export function SessionReview() {
                         />
                       </td>
                       <td>
-                        {lap.lap_number}
+                        {multiStint
+                          ? `S${lapStint(lap)}·${lap.lap_number}`
+                          : lap.lap_number}
                         {lap.is_best && (
                           <span className="tag best review-inline-tag">B</span>
                         )}

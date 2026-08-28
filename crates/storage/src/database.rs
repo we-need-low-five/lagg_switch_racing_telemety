@@ -74,6 +74,7 @@ impl Database {
         self.ensure_track_id_column()?;
         self.ensure_lap_extras_columns()?;
         self.ensure_lap_stint_column()?;
+        self.ensure_lap_stint_break_column()?;
         self.ensure_leaderboard_table()?;
         self.sync_leaderboard_slots_if_needed()?;
         self.backfill_leaderboard_if_empty()?;
@@ -238,6 +239,19 @@ impl Database {
                 "ALTER TABLE laps ADD COLUMN stint INTEGER NOT NULL DEFAULT 1",
                 [],
             )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_lap_stint_break_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(laps)")?;
+        let has_col = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "stint_break_s");
+        if !has_col {
+            self.conn
+                .execute("ALTER TABLE laps ADD COLUMN stint_break_s INTEGER", [])?;
         }
         Ok(())
     }
@@ -483,10 +497,12 @@ impl Database {
             sample_rate_hz,
             channel_manifest_json,
             1,
+            None,
         )?;
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_lap_with_id(
         &self,
         id: Uuid,
@@ -496,11 +512,12 @@ impl Database {
         sample_rate_hz: f32,
         channel_manifest_json: &str,
         stint: u32,
+        stint_break_s: Option<u32>,
     ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
         let stint = stint.max(1);
         self.conn.execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id.to_string(),
                 session_id.to_string(),
@@ -513,6 +530,7 @@ impl Database {
                 summary.abs_level,
                 summary.fuel_used_l,
                 stint,
+                stint_break_s,
             ],
         )?;
         self.conn.execute(
@@ -602,7 +620,7 @@ impl Database {
 
     pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint
+            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s
              FROM laps l
              JOIN lap_files f ON f.lap_id = l.id
              WHERE l.session_id = ?1
@@ -632,6 +650,9 @@ impl Database {
                     let stint: i64 = row.get(13)?;
                     stint.max(1) as u32
                 },
+                stint_break_s: row
+                    .get::<_, Option<i64>>(14)?
+                    .map(|v| v.max(0) as u32),
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -1273,7 +1294,7 @@ mod tests {
     ) -> Uuid {
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
-        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1)
+        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None)
             .unwrap();
         lap_id
     }
@@ -1290,7 +1311,7 @@ mod tests {
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
         let mut summary = summary(lap_time_ms, true);
         summary.fuel_used_l = Some(fuel_used_l);
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None)
             .unwrap();
         lap_id
     }
@@ -1349,7 +1370,7 @@ mod tests {
             .unwrap();
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(dir.path(), session, lap_id, b"inv");
-        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1)
+        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None)
             .unwrap();
 
         assert!(db.list_leaderboard_games().unwrap().is_empty());
@@ -1536,6 +1557,7 @@ mod tests {
             100.0,
             "{}",
             1,
+            None,
         )
         .unwrap();
         db.insert_lap_with_id(
@@ -1546,6 +1568,7 @@ mod tests {
             100.0,
             "{}",
             2,
+            Some(420),
         )
         .unwrap();
 
@@ -1553,7 +1576,9 @@ mod tests {
         assert_eq!(laps.len(), 2);
         assert_eq!(laps[0].id, first);
         assert_eq!(laps[0].stint, 1);
+        assert_eq!(laps[0].stint_break_s, None);
         assert_eq!(laps[1].id, second);
         assert_eq!(laps[1].stint, 2);
+        assert_eq!(laps[1].stint_break_s, Some(420));
     }
 }

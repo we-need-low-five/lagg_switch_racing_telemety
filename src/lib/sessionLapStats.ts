@@ -1,5 +1,6 @@
 import type { GameId, LapRecord } from "../types";
 import { displaySectorTimes } from "./compareLaps";
+import { lapStint } from "./stints";
 
 export interface SessionLapStats {
   bestLap: LapRecord | null;
@@ -136,4 +137,29 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
     averageFuelL: fuelAvg.average,
     averageFuelLapCount: fuelAvg.usedCount,
   };
+}
+
+export interface StintStats {
+  stint: number;
+  lapCount: number;
+  best: SessionLapStats;
+}
+
+/** Per-stint stats keyed by stint number. Empty unless there is more than one stint. */
+export function computeStintStatsMap(
+  laps: LapRecord[],
+  game?: GameId,
+): Map<number, StintStats> {
+  const map = new Map<number, StintStats>();
+  const stints = [...new Set(laps.map(lapStint))];
+  if (stints.length < 2) return map;
+  for (const stint of stints) {
+    const group = laps.filter((lap) => lapStint(lap) === stint);
+    map.set(stint, {
+      stint,
+      lapCount: group.length,
+      best: computeSessionLapStats(group, game),
+    });
+  }
+  return map;
 }

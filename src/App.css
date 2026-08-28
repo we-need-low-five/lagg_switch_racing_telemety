@@ -1645,6 +1645,13 @@ textarea {
   padding: 0.35rem 0.45rem;
 }
 
+.stint-separator .stint-break {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
 .time-best {
   color: #9b51e0;
   font-weight: 600;

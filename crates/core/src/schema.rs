@@ -205,6 +205,10 @@ pub struct LapRecord {
     /// 1-based stint within the session. Gaps in live physics increment this.
     #[serde(default = "default_stint")]
     pub stint: u32,
+    /// Seconds of frozen live physics that opened this lap's stint. Only set on
+    /// the first lap of stints 2+, `None` otherwise (and on legacy rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stint_break_s: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

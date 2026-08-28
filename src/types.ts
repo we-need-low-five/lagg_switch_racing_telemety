@@ -36,6 +36,8 @@ export interface LapRecord {
   fuel_used_l?: number | null;
   /** 1-based stint; omitted/legacy laps are treated as stint 1. */
   stint?: number;
+  /** Seconds of frozen physics that opened this stint; only on the first lap of stints 2+. */
+  stint_break_s?: number | null;
 }
 
 export interface DistanceSample {

@@ -149,6 +149,8 @@ When adding a command: implement in `commands.rs`, register in `lib.rs`, add a t
 
 - Distance-aligned samples use `DISTANCE_GRID_POINTS = 4000` (`sim-core`).
 - Lap files are Parquet under `sessions/{session_id}/laps/{lap_id}.parquet`.
+- Session lifecycle (`crates/daemon/src/recorder.rs`): new session on `track_id` change; a live-physics freeze ≥ `LIVE_PHYSICS_TIMEOUT` (30 s) opens a **stint gap** (next lap → next stint, emits a "Stint N — break detected" notification when it actually splits) without ending the session; a freeze reaching `SESSION_ABANDON_TIMEOUT` (8 min) finalizes the session. A lap whose telemetry was truncated by a freeze is persisted **invalid** (`stint_gap_during_lap`).
+- `laps.stint_break_s` (nullable) holds the freeze seconds that opened a stint; only the first persisted lap of stints 2+ carries it. `.stb` bundles include it (still `bundle_version` 2 — additive optional). Stint separators (`src/lib/stints.ts`) render it as "… · N min break"; the Review separator also shows per-stint lap count / best / avg (`computeStintStatsMap`), and lap-number cells prefix `S{stint}·` when a session has >1 stint.
 - Personal bests (top 3 valid laps per player/track) live in SQLite `leaderboard_laps` plus copies under `leaderboard/laps/`; deleting a session must not remove those rows or files.
 - Portable export format is **`.stb`** (ZIP); see `docs/bundle-format.md` — bump/`bundle_version` carefully.
 - ACC is the **reference adapter**; port parity (validity, sectors, track naming) from ACC when improving other games.

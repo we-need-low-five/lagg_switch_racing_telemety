@@ -48,6 +48,7 @@ Adds optional lap metadata and extended Parquet channels (when recorded from ACC
 | `abs_level` | integer \| null | HUD ABS step at lap start |
 | `fuel_used_l` | number \| null | Liters consumed (lap end) |
 | `stint` | integer | 1-based stint; omitted on older bundles (defaults to 1) |
+| `stint_break_s` | integer \| null | Seconds of frozen physics that opened this stint; only on the first lap of stints 2+ |
 
 Optional Parquet columns (native units: L, °C, PSI, G, degrees):
 

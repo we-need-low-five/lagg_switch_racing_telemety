@@ -12,7 +12,12 @@ import {
   usePreferences,
 } from "../lib/preferences";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
-import { lapsWithStintSeparators } from "../lib/stints";
+import {
+  formatStintBreak,
+  lapStint,
+  lapsWithStintSeparators,
+  sessionHasMultipleStints,
+} from "../lib/stints";
 
 interface LapPanelProps {
   laps: LapRecord[];
@@ -75,6 +80,7 @@ export function LapPanel({
     () => computeSessionLapStats(laps, game ?? undefined),
     [laps, game],
   );
+  const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
 
   return (
     <div className="lap-panel expanded">
@@ -121,7 +127,15 @@ export function LapPanel({
                       className="stint-separator"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <td colSpan={9}>Stint {row.stint}</td>
+                      <td colSpan={9}>
+                        Stint {row.stint}
+                        {row.breakS != null && (
+                          <span className="stint-break">
+                            {" "}
+                            · {formatStintBreak(row.breakS)} break
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   );
                 }
@@ -158,7 +172,9 @@ export function LapPanel({
                     </td>
                     <td>
                       <span className="lap-select-lap">
-                        {lap.lap_number}
+                        {multiStint
+                          ? `S${lapStint(lap)}·${lap.lap_number}`
+                          : lap.lap_number}
                         {lap.is_best && (
                           <span className="tag best review-inline-tag">B</span>
                         )}
