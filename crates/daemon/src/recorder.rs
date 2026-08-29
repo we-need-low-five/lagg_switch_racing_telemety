@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::detect_running_game;
 
-const LIVE_PHYSICS_TIMEOUT: Duration = Duration::from_secs(30);
+const LIVE_PHYSICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Hard cap on a session with no live physics. A stint gap keeps the session
 /// open indefinitely for a pause menu; once this elapses we assume the game was
@@ -131,7 +131,7 @@ impl RecordingService {
             AdapterEvent::LapCompleted(mut summary) => {
                 self.mark_live_physics();
                 if std::mem::take(&mut self.stint_gap_during_lap) {
-                    // Telemetry for this lap was truncated by a >30 s physics
+                    // Telemetry for this lap was truncated by a >10 s physics
                     // freeze — the trace is unusable, so don't trust the lap.
                     summary.valid = false;
                 }
@@ -603,7 +603,7 @@ mod tests {
         run(&mut svc);
         assert_eq!(svc.current_stint, 1);
 
-        // Physics freezes for >30 s, then the driver returns and completes a lap.
+        // Physics freezes for >10 s, then the driver returns and completes a lap.
         svc.expire_heartbeat();
         let note = svc.tick().unwrap(); // gap check runs before the (empty) poll
         assert_eq!(svc.current_stint, 2, "a gap after real laps opens a new stint");
