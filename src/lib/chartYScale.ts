@@ -142,7 +142,6 @@ function isFixedZeroToHundred(key: keyof DistanceSample): boolean {
 function isSymmetric(key: keyof DistanceSample): boolean {
   return (
     key === "steering" ||
-    key === "lap_time_s" ||
     key === "g_force_x" ||
     key === "g_force_y" ||
     key === "g_force_z" ||
@@ -196,6 +195,26 @@ export function niceCeil(value: number): number {
   return snapCeil2Sig(value * (1 + HEADROOM));
 }
 
+/**
+ * Time delta: fit the actual spread of the values on screen and keep the 0
+ * reference line visible, padded by ~8% of the span. Not forced symmetric — a
+ * lap that is only ever behind should not waste half the axis on unused gain —
+ * and driven by whatever series is passed in, so a zoomed mini-sector (delta
+ * rebased to ~0 at entry) scales to tenths instead of the full-lap range.
+ */
+function deltaYRange(displayValues: number[]): ChartYRange {
+  if (displayValues.length === 0) return { min: -0.1, max: 0.1 };
+  const lo = Math.min(0, ...displayValues);
+  const hi = Math.max(0, ...displayValues);
+  const span = hi - lo;
+  if (span === 0) return { min: -0.1, max: 0.1 };
+  const pad = span * HEADROOM;
+  const min = snapFloor2Sig(lo - pad);
+  const max = snapCeil2Sig(hi + pad);
+  if (!(max > min)) return { min: lo - 0.1, max: hi + 0.1 };
+  return { min, max };
+}
+
 function tyreYRange(displayValues: number[]): ChartYRange {
   if (displayValues.length === 0) {
     return { min: 0, max: 1 };
@@ -226,6 +245,10 @@ export function yRangeForChannel(
 
   const finite = displayValues.filter((v) => Number.isFinite(v));
 
+  if (channelKey === "lap_time_s") {
+    return deltaYRange(finite);
+  }
+
   if (isSymmetric(channelKey)) {
     if (finite.length === 0) {
       const extent = niceCeil(0);
@@ -233,13 +256,7 @@ export function yRangeForChannel(
     }
     const dataMin = Math.min(...finite);
     const dataMax = Math.max(...finite);
-    // Time delta is rebased at mini-sector entry, so the visible span can
-    // be max-min of the full lap, which may exceed peak |value|.
-    const peak = Math.max(
-      Math.abs(dataMin),
-      Math.abs(dataMax),
-      channelKey === "lap_time_s" ? dataMax - dataMin : 0,
-    );
+    const peak = Math.max(Math.abs(dataMin), Math.abs(dataMax));
     const extent = niceCeil(peak);
     return { min: -extent, max: extent };
   }

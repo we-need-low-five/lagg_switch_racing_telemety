@@ -106,7 +106,6 @@ interface CompareChartsColumnProps {
   fuelUsedSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   fuelShowNoData: boolean;
   scaleChartSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
-  scaleDeltaSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   scaleFuelUsedSeries: Array<{ label: string; color: string; samples: DistanceSample[] }>;
   tyreTempYRange: ChartYRange;
   tyrePressYRange: ChartYRange;
@@ -131,7 +130,6 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
   fuelUsedSeries,
   fuelShowNoData,
   scaleChartSeries,
-  scaleDeltaSeries,
   scaleFuelUsedSeries,
   tyreTempYRange,
   tyrePressYRange,
@@ -217,7 +215,6 @@ const CompareChartsColumn = memo(function CompareChartsColumn({
               channelKey="lap_time_s"
               game={game}
               samplesByLap={deltaSeries}
-              scaleSamplesByLap={scaleDeltaSeries}
               onCursorMove={onChartCursorMove}
               onPlotMount={onPlotMount}
               onPlotUnmount={onPlotUnmount}
@@ -499,27 +496,6 @@ export function LapCompareView({
       lapHasChannel(samples[meta.lapId] ?? [], "fuel"),
     );
 
-  const scaleDeltaSeries = useMemo(() => {
-    if (referenceSamples.length === 0 || metasWithSamples.length <= 1) return [];
-    return metasWithSamples
-      .filter((meta) => meta.lapId !== referenceId)
-      .map((meta) => ({
-        label: formatCompareDeltaLabel(meta, mode),
-        color: lapColorForId(meta.lapId),
-        samples: buildTimeDeltaSeries(
-          samples[meta.lapId] ?? [],
-          referenceSamples,
-        ),
-      }));
-  }, [
-    referenceSamples,
-    metasWithSamples,
-    referenceId,
-    samples,
-    mode,
-    lapColorForId,
-  ]);
-
   const scaleFuelUsedSeries = useMemo(
     () =>
       metasWithSamples
@@ -764,7 +740,6 @@ export function LapCompareView({
             fuelUsedSeries={fuelUsedSeries}
             fuelShowNoData={fuelShowNoData}
             scaleChartSeries={fullChartSeries}
-            scaleDeltaSeries={scaleDeltaSeries}
             scaleFuelUsedSeries={scaleFuelUsedSeries}
             tyreTempYRange={tyreTempYRange}
             tyrePressYRange={tyrePressYRange}
