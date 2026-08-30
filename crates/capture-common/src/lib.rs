@@ -56,6 +56,18 @@ impl SharedMemoryMapping {
         unsafe { std::ptr::read_unaligned(self.ptr as *const T) }
     }
 
+    /// Copy a POD value out of the mapping at `byte_offset`. Use for large
+    /// segmented mappings (e.g. LMU) where reading the whole layout every poll
+    /// is wasteful and only a sub-struct is needed. When the mapping was opened
+    /// with `size == 0` (map the entire section) the bound check is skipped.
+    pub fn read_pod_at<T: Copy>(&self, byte_offset: usize) -> T {
+        debug_assert!(
+            self.size == 0 || byte_offset + std::mem::size_of::<T>() <= self.size,
+            "read_pod_at past end of shared memory mapping"
+        );
+        unsafe { std::ptr::read_unaligned(self.ptr.add(byte_offset) as *const T) }
+    }
+
     pub fn read_utf16_string_at(&self, offset: usize, max_chars: usize) -> String {
         let mut units = Vec::with_capacity(max_chars);
         for index in 0..max_chars {
