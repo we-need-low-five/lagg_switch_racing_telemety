@@ -6,8 +6,23 @@ use chrono::Utc;
 use sim_capture_common::SharedMemoryMapping;
 use sim_core::{
     acc_cumulative_splits_to_sectors, normalize_brake, normalize_steering, normalize_throttle,
-    AdapterEvent, GameAdapter, GameId, LapSummary, SessionInfo, TelemetrySample,
+    AdapterEvent, GameAdapter, GameId, LapSummary, SessionInfo, SessionKind, TelemetrySample,
 };
+
+/// Sentinel for "no `ScoringInfoV01.mSession` observed yet".
+const LMU_SESSION_UNSET: i32 = i32::MIN;
+
+/// rF2/LMU `mSession`: 0 test day; 1–4 practice; 5–8 qualifying; 9 warmup;
+/// 10–13 race. A warmup shares the race's lap counter, so treat it as Race.
+fn lmu_session_kind(m_session: i32) -> SessionKind {
+    match m_session {
+        0 => SessionKind::Practice,
+        1..=4 => SessionKind::Practice,
+        5..=8 => SessionKind::Qualifying,
+        9..=13 => SessionKind::Race,
+        _ => SessionKind::Unknown,
+    }
+}
 
 /// Polls the session clock may stay frozen before we stop treating LMU as live.
 /// When the game exits, Windows keeps our `LMU_Data` handle — and therefore the
@@ -23,6 +38,9 @@ pub struct LmuAdapter {
     session_announced: bool,
     last_track_id: String,
     last_car: String,
+    /// `ScoringInfoV01.mSession` at the last announce. A change is a session
+    /// boundary even on the same track/car (each phase restarts `mLapNumber`).
+    last_session: i32,
     /// Current lap number last seen on the player's telemetry (`mLapNumber`).
     /// -1 until the player starts the first flying/out lap.
     last_lap: i32,
@@ -39,6 +57,7 @@ impl LmuAdapter {
             session_announced: false,
             last_track_id: String::new(),
             last_car: String::new(),
+            last_session: LMU_SESSION_UNSET,
             last_lap: -1,
             pit_this_lap: false,
             last_elapsed_time: f64::NAN,
@@ -81,7 +100,7 @@ impl LmuAdapter {
         fallback
     }
 
-    fn session_info(tel: &TelemInfoV01, track_id: String) -> SessionInfo {
+    fn session_info(tel: &TelemInfoV01, track_id: String, session_kind: SessionKind) -> SessionInfo {
         SessionInfo {
             game: GameId::Lmu,
             track_id,
@@ -89,6 +108,7 @@ impl LmuAdapter {
             car: c_str(&tel.mVehicleName),
             game_version: "LMU".to_string(),
             player_name: String::new(),
+            session_kind,
         }
     }
 }
@@ -153,11 +173,14 @@ impl GameAdapter for LmuAdapter {
         );
         let in_realtime: u8 = map
             .read_pod_at(scoring_info_off + core::mem::offset_of!(ScoringInfoV01, mInRealtime));
+        let m_session: i32 = map
+            .read_pod_at(scoring_info_off + core::mem::offset_of!(ScoringInfoV01, mSession));
         let scoring = Self::player_scoring(map, num_vehicles, tel.mID);
 
         let track = c_str(&tel.mTrackName);
         let car = c_str(&tel.mVehicleName);
         let track_id = slugify_track_id(&track);
+        let session_kind = lmu_session_kind(m_session);
 
         // Announce once the player is actually in the car on track (not the
         // monitor / menus) — avoids empty sessions and bogus splits on reload.
@@ -168,9 +191,10 @@ impl GameAdapter for LmuAdapter {
             self.session_announced = true;
             self.last_track_id = track_id.clone();
             self.last_car = car.clone();
+            self.last_session = m_session;
             self.last_lap = -1;
             self.pit_this_lap = false;
-            return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id));
+            return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id, session_kind));
         }
 
         let track_changed = !track_id.is_empty()
@@ -179,12 +203,17 @@ impl GameAdapter for LmuAdapter {
         let car_changed = !car.is_empty()
             && !self.last_car.is_empty()
             && !self.last_car.eq_ignore_ascii_case(&car);
-        if track_changed || car_changed {
+        // Each weekend phase restarts LMU's `mLapNumber`, so an `mSession` change
+        // is its own session boundary.
+        let session_changed =
+            self.last_session != LMU_SESSION_UNSET && m_session != self.last_session;
+        if track_changed || car_changed || session_changed {
             self.last_track_id = track_id.clone();
             self.last_car = car.clone();
+            self.last_session = m_session;
             self.last_lap = -1;
             self.pit_this_lap = false;
-            return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id));
+            return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id, session_kind));
         }
 
         let in_pits = scoring.as_ref().map(|s| s.mInPits != 0).unwrap_or(false);

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sim_core::{LapRecord, LapSummary, SessionRecord};
+use sim_core::{LapRecord, LapSummary, SessionKind, SessionRecord};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -116,13 +116,14 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
         anyhow::bail!("bundle has too many laps");
     }
 
-    let session_id = db.create_session(
+    let session_id = db.create_session_with_kind(
         manifest.session.game,
         &manifest.session.track_id,
         &manifest.session.track,
         &manifest.session.car,
         &manifest.session.game_version,
         &manifest.session.player_name,
+        manifest.session.session_kind,
     )?;
 
     let session_dir = data_dir
@@ -147,8 +148,12 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
             parquet_io::default_channel_manifest_json()
         };
 
+        let stint_kind_token = lap
+            .stint_kind
+            .filter(|k| *k != SessionKind::Unknown)
+            .map(|k| k.as_str());
         db.conn().execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 new_lap_id.to_string(),
                 session_id.to_string(),
@@ -164,6 +169,7 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
                 lap.fuel_used_l,
                 lap.stint.max(1),
                 lap.stint_break_s,
+                stint_kind_token,
             ],
         )?;
         db.conn().execute(

@@ -2,6 +2,8 @@ use crate::acc_statics::{AccStaticsSnapshot, STATIC_NAME, STATIC_SIZE};
 
 use acc_shared_memory_rs::core::SharedMemoryReader;
 
+use acc_shared_memory_rs::enums::AccSessionType;
+
 use acc_shared_memory_rs::maps::GraphicsMap;
 
 use acc_shared_memory_rs::parsers::{parse_graphics_map, parse_physics_map};
@@ -14,9 +16,25 @@ use sim_core::{
 
     kmh_to_mps, normalize_brake, normalize_throttle, AdapterEvent,
 
-    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, TelemetrySample,
+    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
 
 };
+
+/// Map ACC's session type onto the sim-agnostic [`SessionKind`].
+fn acc_session_kind(session_type: AccSessionType) -> SessionKind {
+    match session_type {
+        AccSessionType::Practice => SessionKind::Practice,
+        AccSessionType::Qualifying | AccSessionType::HotlapSuperpole => SessionKind::Qualifying,
+        AccSessionType::Race => SessionKind::Race,
+        AccSessionType::Hotlap => SessionKind::Hotlap,
+        AccSessionType::TimeAttack => SessionKind::TimeAttack,
+        AccSessionType::Drift | AccSessionType::Drag | AccSessionType::Hotstint => SessionKind::Other,
+        AccSessionType::Unknown => SessionKind::Unknown,
+    }
+}
+
+/// Sentinel for "no session type observed yet" in the adapter's last-seen state.
+const SESSION_UNSET: i32 = i32::MIN;
 
 
 
@@ -63,6 +81,14 @@ pub struct AccAdapter {
     last_track_id: String,
 
     last_car: String,
+
+    /// ACC `graphics.session_type` / `session_index` at the last announce. ACC
+    /// keeps the same track and car across Practice → Qualifying → Race but
+    /// restarts `completed_lap` each phase, so a change here is a real session
+    /// boundary. `SESSION_UNSET` until the first announce.
+    last_session_type: i32,
+
+    last_session_index: i32,
 
     current_lap_valid: bool,
 
@@ -113,6 +139,10 @@ impl AccAdapter {
             last_track_id: String::new(),
 
             last_car: String::new(),
+
+            last_session_type: SESSION_UNSET,
+
+            last_session_index: SESSION_UNSET,
 
             current_lap_valid: true,
 
@@ -189,6 +219,10 @@ impl AccAdapter {
         self.last_track_id.clear();
 
         self.last_car.clear();
+
+        self.last_session_type = SESSION_UNSET;
+
+        self.last_session_index = SESSION_UNSET;
 
         self.last_completed_laps = -1;
 
@@ -403,7 +437,7 @@ impl AccAdapter {
 
 
 
-    fn session_info(statics: &AccStaticsSnapshot) -> Option<SessionInfo> {
+    fn session_info(graphics: &GraphicsMap, statics: &AccStaticsSnapshot) -> Option<SessionInfo> {
 
         let track = statics.track_name()?;
 
@@ -431,6 +465,8 @@ impl AccAdapter {
 
             player_name: statics.player_display(),
 
+            session_kind: acc_session_kind(graphics.session_type),
+
         })
 
     }
@@ -439,7 +475,7 @@ impl AccAdapter {
 
     fn session_ready(graphics: &GraphicsMap, statics: &AccStaticsSnapshot) -> bool {
 
-        graphics.status.is_active() && Self::session_info(statics).is_some()
+        graphics.status.is_active() && Self::session_info(graphics, statics).is_some()
 
     }
 
@@ -539,11 +575,16 @@ impl GameAdapter for AccAdapter {
 
             }
 
-            let info = Self::session_info(&statics).expect("session_ready guarantees session info");
+            let info = Self::session_info(&graphics, &statics)
+                .expect("session_ready guarantees session info");
 
             self.last_track_id = info.track_id.clone();
 
             self.last_car = info.car.clone();
+
+            self.last_session_type = graphics.session_type as i32;
+
+            self.last_session_index = graphics.session_index;
 
             return AdapterEvent::SessionInfo(info);
 
@@ -561,11 +602,12 @@ impl GameAdapter for AccAdapter {
 
 
 
-        // Only treat a track_id / car change as a real session boundary while
-        // the sim is actually on track. Menu navigation flips statics fields
-        // without a live session and must not spawn empty sessions downstream.
+        // Only treat a track_id / car / session-type change as a real session
+        // boundary while the sim is actually on track. Menu navigation flips
+        // statics fields without a live session and must not spawn empty
+        // sessions downstream.
 
-        if let Some(info) = Self::session_info(&statics) {
+        if let Some(info) = Self::session_info(&graphics, &statics) {
 
             let track_changed = !self.last_track_id.is_empty()
 
@@ -579,13 +621,24 @@ impl GameAdapter for AccAdapter {
 
                 && !self.last_car.eq_ignore_ascii_case(info.car.trim());
 
-            if track_changed || car_changed {
+            // ACC restarts `completed_lap` at 0 for each phase of a weekend, so
+            // Practice → Qualifying → Race on the same track/car needs its own
+            // session or the phases' lap numbers collide downstream.
+            let session_changed = self.last_session_type != SESSION_UNSET
+                && (graphics.session_type as i32 != self.last_session_type
+                    || graphics.session_index != self.last_session_index);
+
+            if track_changed || car_changed || session_changed {
 
                 self.reset_lap_progress();
 
                 self.last_track_id = info.track_id.clone();
 
                 self.last_car = info.car.clone();
+
+                self.last_session_type = graphics.session_type as i32;
+
+                self.last_session_index = graphics.session_index;
 
                 return AdapterEvent::SessionInfo(info);
 

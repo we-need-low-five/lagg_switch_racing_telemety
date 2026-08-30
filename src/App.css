@@ -427,6 +427,19 @@ textarea {
   gap: 0.5rem;
 }
 
+.session-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  margin: 0.4rem 0;
+}
+
+.session-card-title h3 {
+  margin: 0;
+}
+
 .badge,
 .tag {
   display: inline-flex;

@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use sim_core::{
     FuelProfile, GameId, LapRecord, LapSummary, LeaderboardEntry, LeaderboardTrackOption,
-    SectorTimes, SessionRecord, TrackLapOption,
+    SectorTimes, SessionKind, SessionRecord, TrackLapOption,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -72,15 +72,18 @@ impl Database {
             "#,
         )?;
         self.ensure_track_id_column()?;
+        self.ensure_session_kind_column()?;
         self.ensure_lap_extras_columns()?;
         self.ensure_lap_stint_column()?;
         self.ensure_lap_stint_break_column()?;
+        self.ensure_lap_stint_kind_column()?;
         self.ensure_leaderboard_table()?;
         self.sync_leaderboard_slots_if_needed()?;
         self.backfill_leaderboard_if_empty()?;
         self.ensure_session_fuel_stats_table()?;
         self.backfill_session_fuel_stats()?;
         self.prune_lapless_sessions()?;
+        self.merge_split_weekend_sessions()?;
         Ok(())
     }
 
@@ -257,6 +260,22 @@ impl Database {
         Ok(())
     }
 
+    /// Per-lap phase label for its stint (`practice` / `qualifying` / `race` …).
+    /// A weekend recorded as one session carries the phase on each stint's laps;
+    /// NULL on legacy rows and stints the sim reported no type for.
+    fn ensure_lap_stint_kind_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(laps)")?;
+        let has_col = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "stint_kind");
+        if !has_col {
+            self.conn
+                .execute("ALTER TABLE laps ADD COLUMN stint_kind TEXT", [])?;
+        }
+        Ok(())
+    }
+
     /// Startup sweep for sessions that never recorded a lap. Runs before the
     /// recorder starts, so any lapless session is a stale artifact (app killed
     /// mid-menu, pre-gating track flips). Leaderboard/fuel-stats rows are only
@@ -279,6 +298,21 @@ impl Database {
         if !has_track_id {
             self.conn.execute(
                 "ALTER TABLE sessions ADD COLUMN track_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn ensure_session_kind_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(sessions)")?;
+        let has_col = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "session_kind");
+        if !has_col {
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'unknown'",
                 [],
             )?;
         }
@@ -435,6 +469,8 @@ impl Database {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    /// Create a session whose type the sim did not report. Prefer
+    /// [`Database::create_session_with_kind`] when a [`SessionKind`] is known.
     pub fn create_session(
         &self,
         game: GameId,
@@ -444,10 +480,32 @@ impl Database {
         game_version: &str,
         player_name: &str,
     ) -> Result<Uuid> {
+        self.create_session_with_kind(
+            game,
+            track_id,
+            track,
+            car,
+            game_version,
+            player_name,
+            SessionKind::Unknown,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_session_with_kind(
+        &self,
+        game: GameId,
+        track_id: &str,
+        track: &str,
+        car: &str,
+        game_version: &str,
+        player_name: &str,
+        session_kind: SessionKind,
+    ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let started_at = Utc::now();
         self.conn.execute(
-            "INSERT INTO sessions (id, game, track_id, track, car, started_at, ended_at, game_version, player_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
+            "INSERT INTO sessions (id, game, track_id, track, car, started_at, ended_at, game_version, player_name, session_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9)",
             params![
                 id.to_string(),
                 serde_json::to_string(&game)?,
@@ -457,6 +515,7 @@ impl Database {
                 started_at.to_rfc3339(),
                 game_version,
                 player_name,
+                session_kind.as_str(),
             ],
         )?;
         Ok(id)
@@ -479,6 +538,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_session_metadata(
         &self,
         session_id: Uuid,
@@ -487,15 +547,17 @@ impl Database {
         car: &str,
         game_version: &str,
         player_name: &str,
+        session_kind: SessionKind,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET track_id = ?1, track = ?2, car = ?3, game_version = ?4, player_name = ?5 WHERE id = ?6",
+            "UPDATE sessions SET track_id = ?1, track = ?2, car = ?3, game_version = ?4, player_name = ?5, session_kind = ?6 WHERE id = ?7",
             params![
                 track_id,
                 track,
                 car,
                 game_version,
                 player_name,
+                session_kind.as_str(),
                 session_id.to_string(),
             ],
         )?;
@@ -521,6 +583,7 @@ impl Database {
             channel_manifest_json,
             1,
             None,
+            SessionKind::Unknown,
         )?;
         Ok(id)
     }
@@ -536,11 +599,16 @@ impl Database {
         channel_manifest_json: &str,
         stint: u32,
         stint_break_s: Option<u32>,
+        stint_kind: SessionKind,
     ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
         let stint = stint.max(1);
+        let stint_kind_token = match stint_kind {
+            SessionKind::Unknown => None,
+            known => Some(known.as_str()),
+        };
         self.conn.execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id.to_string(),
                 session_id.to_string(),
@@ -554,6 +622,7 @@ impl Database {
                 summary.fuel_used_l,
                 stint,
                 stint_break_s,
+                stint_kind_token,
             ],
         )?;
         self.conn.execute(
@@ -609,7 +678,7 @@ impl Database {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name,
+            "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name, s.session_kind,
                     (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
                     (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
              FROM sessions s
@@ -637,16 +706,49 @@ impl Database {
                 }),
                 game_version: row.get(7)?,
                 player_name: row.get(8)?,
-                lap_count: row.get(9)?,
-                best_lap_time_ms: row.get(10)?,
+                session_kind: SessionKind::from_token(&row.get::<_, String>(9)?),
+                session_kinds: Vec::new(),
+                lap_count: row.get(10)?,
+                best_lap_time_ms: row.get(11)?,
             })
         })?;
-        Ok(rows.filter_map(Result::ok).collect())
+        let mut sessions: Vec<SessionRecord> = rows.filter_map(Result::ok).collect();
+        drop(stmt);
+        for session in &mut sessions {
+            session.session_kinds = self.session_phase_labels(session.id, session.session_kind)?;
+        }
+        Ok(sessions)
+    }
+
+    /// Distinct phases the session's stints cover, ordered by when they ran.
+    /// Falls back to `[entry_kind]` for sessions whose laps predate per-lap
+    /// phase tracking, and to `[]` when nothing was ever reported.
+    fn session_phase_labels(
+        &self,
+        session_id: Uuid,
+        entry_kind: SessionKind,
+    ) -> Result<Vec<SessionKind>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stint_kind FROM laps
+             WHERE session_id = ?1 AND stint_kind IS NOT NULL
+             GROUP BY stint_kind
+             ORDER BY MIN(stint) ASC",
+        )?;
+        let kinds: Vec<SessionKind> = stmt
+            .query_map(params![session_id.to_string()], |r| r.get::<_, String>(0))?
+            .filter_map(Result::ok)
+            .map(|t| SessionKind::from_token(&t))
+            .filter(|k| *k != SessionKind::Unknown)
+            .collect();
+        if kinds.is_empty() && entry_kind != SessionKind::Unknown {
+            return Ok(vec![entry_kind]);
+        }
+        Ok(kinds)
     }
 
     pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s
+            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s, l.stint_kind
              FROM laps l
              JOIN lap_files f ON f.lap_id = l.id
              WHERE l.session_id = ?1
@@ -679,6 +781,9 @@ impl Database {
                 stint_break_s: row
                     .get::<_, Option<i64>>(14)?
                     .map(|v| v.max(0) as u32),
+                stint_kind: row
+                    .get::<_, Option<String>>(15)?
+                    .map(|t| SessionKind::from_token(&t)),
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -709,6 +814,287 @@ impl Database {
         self.conn.execute(
             "UPDATE lap_files SET parquet_path = ?1 WHERE lap_id = ?2",
             params![path, lap_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Fold `absorbed` sessions into `survivor`: their laps become later stints
+    /// of the survivor (kept in real start-time order), their parquet files move
+    /// under the survivor's directory, and the absorbed session rows are
+    /// deleted. Lap ids are preserved so pinned laps and leaderboard entries
+    /// survive. Each part's laps are labelled with that part's session type
+    /// where they had none, so the merged stints read "Qualifying", "Race", …
+    pub fn merge_sessions(&self, survivor: Uuid, absorbed: &[Uuid]) -> Result<()> {
+        let absorbed: Vec<Uuid> = absorbed
+            .iter()
+            .copied()
+            .filter(|id| *id != survivor)
+            .collect();
+        if absorbed.is_empty() {
+            return Ok(());
+        }
+
+        struct Part {
+            id: Uuid,
+            started_at: String,
+            ended_at: Option<String>,
+            kind: SessionKind,
+        }
+        let mut parts: Vec<Part> = Vec::new();
+        for id in std::iter::once(survivor).chain(absorbed.iter().copied()) {
+            let row = self.conn.query_row(
+                "SELECT started_at, ended_at, session_kind FROM sessions WHERE id = ?1",
+                params![id.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            match row {
+                Ok((started_at, ended_at, kind)) => parts.push(Part {
+                    id,
+                    started_at,
+                    ended_at,
+                    kind: SessionKind::from_token(&kind),
+                }),
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        if !parts.iter().any(|p| p.id == survivor) {
+            anyhow::bail!("merge survivor {survivor} not found");
+        }
+        parts.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+
+        // Re-label each part's own laps with its phase, then re-point them to
+        // the survivor and renumber stints across the whole set in time order.
+        let mut next_stint: u32 = 0;
+        for part in &parts {
+            if part.kind != SessionKind::Unknown {
+                self.conn.execute(
+                    "UPDATE laps SET stint_kind = COALESCE(stint_kind, ?1) WHERE session_id = ?2",
+                    params![part.kind.as_str(), part.id.to_string()],
+                )?;
+            }
+            let mut stmt = self.conn.prepare(
+                "SELECT id, stint FROM laps WHERE session_id = ?1 ORDER BY stint ASC, lap_number ASC",
+            )?;
+            let laps: Vec<(String, i64)> = stmt
+                .query_map(params![part.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+            let mut prev_src: Option<i64> = None;
+            for (lap_id, src_stint) in laps {
+                if prev_src != Some(src_stint) {
+                    next_stint += 1;
+                    prev_src = Some(src_stint);
+                }
+                self.conn.execute(
+                    "UPDATE laps SET stint = ?1, session_id = ?2 WHERE id = ?3",
+                    params![next_stint, survivor.to_string(), lap_id],
+                )?;
+            }
+        }
+
+        // Move parquet files still living under an absorbed session's directory.
+        for id in &absorbed {
+            let like = format!("sessions/{id}/%");
+            let mut stmt = self
+                .conn
+                .prepare("SELECT lap_id, parquet_path FROM lap_files WHERE parquet_path LIKE ?1")?;
+            let files: Vec<(String, String)> = stmt
+                .query_map(params![like], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+            for (lap_id, old_rel) in files {
+                let file_name = Path::new(&old_rel)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if file_name.is_empty() {
+                    continue;
+                }
+                let new_rel = format!("sessions/{survivor}/laps/{file_name}");
+                let old_abs = crate::paths::resolve_data_relative(&self.data_dir, &old_rel)?;
+                let new_abs = crate::paths::resolve_data_relative(&self.data_dir, &new_rel)?;
+                if old_abs.exists() {
+                    if let Some(parent) = new_abs.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    if std::fs::rename(&old_abs, &new_abs).is_err() {
+                        std::fs::copy(&old_abs, &new_abs)?;
+                        let _ = std::fs::remove_file(&old_abs);
+                    }
+                }
+                self.conn.execute(
+                    "UPDATE lap_files SET parquet_path = ?1 WHERE lap_id = ?2",
+                    params![new_rel, lap_id],
+                )?;
+                self.conn.execute(
+                    "UPDATE leaderboard_laps SET parquet_path = ?1 WHERE parquet_path = ?2",
+                    params![new_rel, old_rel],
+                )?;
+            }
+        }
+
+        let last_ended = parts.iter().filter_map(|p| p.ended_at.clone()).max();
+        for id in &absorbed {
+            self.conn.execute(
+                "UPDATE leaderboard_laps SET source_session_id = ?1 WHERE source_session_id = ?2",
+                params![survivor.to_string(), id.to_string()],
+            )?;
+            self.conn.execute(
+                "DELETE FROM session_fuel_stats WHERE session_id = ?1",
+                params![id.to_string()],
+            )?;
+            self.conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+            let dir = self.data_dir.join("sessions").join(id.to_string());
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        if let Some(ended) = last_ended {
+            self.conn.execute(
+                "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+                params![ended, survivor.to_string()],
+            )?;
+        }
+
+        self.refresh_best_lap(survivor)?;
+        let _ = self.refresh_session_fuel_stats(survivor);
+        Ok(())
+    }
+
+    /// One-time repair for weekends the interim build recorded as a session per
+    /// phase. Folds each run of adjacent sessions on the same car and track —
+    /// every one with a sim-reported session type, each started within 20 min of
+    /// the previous finishing — into the earliest, later phases becoming later
+    /// stints. Runs at most once (guarded in `app_meta`).
+    fn merge_split_weekend_sessions(&self) -> Result<()> {
+        let done: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'weekend_merge_done'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if done.is_some() {
+            return Ok(());
+        }
+
+        let parse = |s: &str| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        };
+
+        struct Raw {
+            id: String,
+            game: String,
+            track: String,
+            car: String,
+            started: String,
+            ended: Option<String>,
+            kind: String,
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, game, track_id, car, started_at, ended_at, session_kind
+             FROM sessions ORDER BY started_at ASC",
+        )?;
+        let raw: Vec<Raw> = stmt
+            .query_map([], |r| {
+                Ok(Raw {
+                    id: r.get(0)?,
+                    game: r.get(1)?,
+                    track: r.get(2)?,
+                    car: r.get(3)?,
+                    started: r.get(4)?,
+                    ended: r.get(5)?,
+                    kind: r.get(6)?,
+                })
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        struct S {
+            id: Uuid,
+            game: String,
+            track_key: String,
+            car_key: String,
+            started_at: DateTime<Utc>,
+            ended_at: Option<DateTime<Utc>>,
+            known_kind: bool,
+        }
+        let mut rows: Vec<S> = Vec::new();
+        for r in raw {
+            let (Ok(id), Some(started_at)) = (Uuid::parse_str(&r.id), parse(&r.started)) else {
+                continue;
+            };
+            rows.push(S {
+                id,
+                game: r.game,
+                track_key: r.track.trim().to_ascii_lowercase(),
+                car_key: r.car.trim().to_ascii_lowercase(),
+                started_at,
+                ended_at: r.ended.as_deref().and_then(parse),
+                known_kind: SessionKind::from_token(&r.kind) != SessionKind::Unknown,
+            });
+        }
+
+        let max_gap = chrono::Duration::minutes(20);
+        let min_gap = chrono::Duration::seconds(-120);
+        let mut chains: Vec<Vec<Uuid>> = Vec::new();
+        let mut current: Vec<&S> = Vec::new();
+        for row in &rows {
+            let joins = row.known_kind
+                && current.last().is_some_and(|last| {
+                    last.game == row.game
+                        && last.track_key == row.track_key
+                        && !row.track_key.is_empty()
+                        && last.car_key == row.car_key
+                        && last.ended_at.is_some_and(|end| {
+                            let gap = row.started_at - end;
+                            gap >= min_gap && gap <= max_gap
+                        })
+                });
+            if joins {
+                current.push(row);
+                continue;
+            }
+            if current.len() >= 2 {
+                chains.push(current.iter().map(|s| s.id).collect());
+            }
+            current.clear();
+            if row.known_kind {
+                current.push(row);
+            }
+        }
+        if current.len() >= 2 {
+            chains.push(current.iter().map(|s| s.id).collect());
+        }
+
+        for chain in chains {
+            let (survivor, absorbed) = chain.split_first().expect("chain has >= 2");
+            if let Err(err) = self.merge_sessions(*survivor, absorbed) {
+                tracing::warn!(error = %err, survivor = %survivor, "weekend merge failed");
+            }
+        }
+
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES ('weekend_merge_done', 'v1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
         )?;
         Ok(())
     }
@@ -773,36 +1159,46 @@ impl Database {
 
     pub fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name,
+            "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name, s.session_kind,
                     (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
                     (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
              FROM sessions s WHERE s.id = ?1",
         )?;
-        let mut rows = stmt.query(params![session_id.to_string()])?;
-        let Some(row) = rows.next()? else {
-            return Ok(None);
-        };
-        let game: String = row.get(1)?;
-        let started_at: String = row.get(5)?;
-        let ended_at: Option<String> = row.get(6)?;
-        Ok(Some(SessionRecord {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
-            game: serde_json::from_str(&game).unwrap_or(GameId::Acc),
-            track_id: row.get(2)?,
-            track: row.get(3)?,
-            car: row.get(4)?,
-            started_at: DateTime::parse_from_rfc3339(&started_at)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            ended_at: ended_at.and_then(|v| {
-                DateTime::parse_from_rfc3339(&v)
-                    .ok()
+        let record = {
+            let mut rows = stmt.query(params![session_id.to_string()])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            let game: String = row.get(1)?;
+            let started_at: String = row.get(5)?;
+            let ended_at: Option<String> = row.get(6)?;
+            SessionRecord {
+                id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_default(),
+                game: serde_json::from_str(&game).unwrap_or(GameId::Acc),
+                track_id: row.get(2)?,
+                track: row.get(3)?,
+                car: row.get(4)?,
+                started_at: DateTime::parse_from_rfc3339(&started_at)
                     .map(|d| d.with_timezone(&Utc))
-            }),
-            game_version: row.get(7)?,
-            player_name: row.get(8)?,
-            lap_count: row.get(9)?,
-            best_lap_time_ms: row.get(10)?,
+                    .unwrap_or_else(|_| Utc::now()),
+                ended_at: ended_at.and_then(|v| {
+                    DateTime::parse_from_rfc3339(&v)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
+                game_version: row.get(7)?,
+                player_name: row.get(8)?,
+                session_kind: SessionKind::from_token(&row.get::<_, String>(9)?),
+                session_kinds: Vec::new(),
+                lap_count: row.get(10)?,
+                best_lap_time_ms: row.get(11)?,
+            }
+        };
+        drop(stmt);
+        let session_kinds = self.session_phase_labels(record.id, record.session_kind)?;
+        Ok(Some(SessionRecord {
+            session_kinds,
+            ..record
         }))
     }
 
@@ -1320,7 +1716,7 @@ mod tests {
     ) -> Uuid {
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
-        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None)
+        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
             .unwrap();
         lap_id
     }
@@ -1337,7 +1733,7 @@ mod tests {
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
         let mut summary = summary(lap_time_ms, true);
         summary.fuel_used_l = Some(fuel_used_l);
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
             .unwrap();
         lap_id
     }
@@ -1396,7 +1792,7 @@ mod tests {
             .unwrap();
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(dir.path(), session, lap_id, b"inv");
-        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None)
+        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
             .unwrap();
 
         assert!(db.list_leaderboard_games().unwrap().is_empty());
@@ -1584,6 +1980,7 @@ mod tests {
             "{}",
             1,
             None,
+            SessionKind::Unknown,
         )
         .unwrap();
         db.insert_lap_with_id(
@@ -1595,6 +1992,7 @@ mod tests {
             "{}",
             2,
             Some(420),
+            SessionKind::Unknown,
         )
         .unwrap();
 
@@ -1606,6 +2004,223 @@ mod tests {
         assert_eq!(laps[1].id, second);
         assert_eq!(laps[1].stint, 2);
         assert_eq!(laps[1].stint_break_s, Some(420));
+    }
+
+    fn set_session_times(db: &Database, id: Uuid, started: &str, ended: Option<&str>) {
+        db.conn()
+            .execute(
+                "UPDATE sessions SET started_at = ?1, ended_at = ?2 WHERE id = ?3",
+                params![started, ended, id.to_string()],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn merge_sessions_folds_absorbed_into_later_stints() {
+        let (dir, db) = open_temp();
+        let quali = db
+            .create_session_with_kind(
+                GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Qualifying,
+            )
+            .unwrap();
+        set_session_times(
+            &db, quali,
+            "2026-08-30T10:00:00+00:00", Some("2026-08-30T10:20:00+00:00"),
+        );
+        let race = db
+            .create_session_with_kind(
+                GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Race,
+            )
+            .unwrap();
+        set_session_times(
+            &db, race,
+            "2026-08-30T10:25:00+00:00", Some("2026-08-30T11:30:00+00:00"),
+        );
+
+        insert_valid_lap(&db, dir.path(), quali, 109_000, b"q1");
+        insert_valid_lap(&db, dir.path(), quali, 108_000, b"q2");
+        let race_lap = insert_valid_lap(&db, dir.path(), race, 112_000, b"r1");
+        insert_valid_lap(&db, dir.path(), race, 111_500, b"r2");
+
+        db.merge_sessions(quali, &[race]).unwrap();
+
+        assert!(db.get_session(race).unwrap().is_none(), "absorbed shell removed");
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, quali);
+        assert_eq!(
+            sessions[0].session_kinds,
+            vec![SessionKind::Qualifying, SessionKind::Race],
+            "the card lists every phase in run order"
+        );
+        assert_eq!(
+            sessions[0].ended_at.unwrap().to_rfc3339(),
+            "2026-08-30T11:30:00+00:00",
+            "survivor ends when the last phase ended"
+        );
+
+        let laps = db.list_laps(quali).unwrap();
+        assert_eq!(laps.len(), 4);
+        assert_eq!(
+            laps.iter().map(|l| l.stint).collect::<Vec<_>>(),
+            vec![1, 1, 2, 2],
+            "the race becomes stint 2"
+        );
+        assert_eq!(
+            laps.iter().map(|l| l.stint_kind).collect::<Vec<_>>(),
+            vec![
+                Some(SessionKind::Qualifying),
+                Some(SessionKind::Qualifying),
+                Some(SessionKind::Race),
+                Some(SessionKind::Race),
+            ],
+        );
+
+        let moved = db.get_lap_parquet_path(race_lap).unwrap().unwrap();
+        assert!(
+            moved.starts_with(&format!("sessions/{quali}/")),
+            "the race lap's parquet moved under the survivor: {moved}"
+        );
+        assert!(dir.path().join(&moved).exists(), "moved file is on disk");
+    }
+
+    #[test]
+    fn startup_merges_back_to_back_weekend_phases() {
+        let (dir, db) = open_temp();
+        // Clear the run-once guard set by the first open so the sweep re-runs.
+        db.conn()
+            .execute("DELETE FROM app_meta WHERE key = 'weekend_merge_done'", [])
+            .unwrap();
+
+        let quali = db
+            .create_session_with_kind(
+                GameId::Acc, "spa", "Spa", "Porsche", "1.0", "Dmytro",
+                SessionKind::Qualifying,
+            )
+            .unwrap();
+        set_session_times(
+            &db, quali,
+            "2026-08-30T14:00:00+00:00", Some("2026-08-30T14:18:00+00:00"),
+        );
+        let race = db
+            .create_session_with_kind(
+                GameId::Acc, "spa", "Spa", "Porsche", "1.0", "Dmytro",
+                SessionKind::Race,
+            )
+            .unwrap();
+        set_session_times(
+            &db, race,
+            "2026-08-30T14:23:00+00:00", Some("2026-08-30T15:40:00+00:00"),
+        );
+        // An unrelated later session on the same combo, well outside the gap.
+        let practice_next_day = db
+            .create_session_with_kind(
+                GameId::Acc, "spa", "Spa", "Porsche", "1.0", "Dmytro",
+                SessionKind::Practice,
+            )
+            .unwrap();
+        set_session_times(&db, practice_next_day, "2026-08-31T09:00:00+00:00", None);
+
+        insert_valid_lap(&db, dir.path(), quali, 109_000, b"q1");
+        insert_valid_lap(&db, dir.path(), race, 112_000, b"r1");
+        insert_valid_lap(&db, dir.path(), practice_next_day, 108_000, b"p1");
+
+        db.merge_split_weekend_sessions().unwrap();
+
+        let sessions = db.list_sessions().unwrap();
+        let ids: Vec<Uuid> = sessions.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&quali), "quali survives as the weekend session");
+        assert!(!ids.contains(&race), "race folded in");
+        assert!(
+            ids.contains(&practice_next_day),
+            "the next-day session is left alone"
+        );
+
+        let laps = db.list_laps(quali).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.stint_kind).collect::<Vec<_>>(),
+            vec![Some(SessionKind::Qualifying), Some(SessionKind::Race)],
+        );
+        assert_eq!(laps.iter().map(|l| l.stint).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn startup_weekend_merge_runs_only_once() {
+        let (dir, db) = open_temp();
+        let a = db
+            .create_session_with_kind(
+                GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Qualifying,
+            )
+            .unwrap();
+        set_session_times(
+            &db, a,
+            "2026-08-30T10:00:00+00:00", Some("2026-08-30T10:20:00+00:00"),
+        );
+        let b = db
+            .create_session_with_kind(
+                GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Race,
+            )
+            .unwrap();
+        set_session_times(
+            &db, b,
+            "2026-08-30T10:25:00+00:00", Some("2026-08-30T11:00:00+00:00"),
+        );
+        insert_valid_lap(&db, dir.path(), a, 109_000, b"a1");
+        insert_valid_lap(&db, dir.path(), b, 112_000, b"b1");
+
+        // Guard was set on open, so the sweep is inert now.
+        db.merge_split_weekend_sessions().unwrap();
+        assert_eq!(db.list_sessions().unwrap().len(), 2, "guard blocks re-merge");
+    }
+
+    #[test]
+    fn session_phase_labels_single_and_legacy() {
+        let (dir, db) = open_temp();
+
+        // Single-phase session recorded with per-lap stint_kind.
+        let quali = db
+            .create_session_with_kind(
+                GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Qualifying,
+            )
+            .unwrap();
+        let lap_id = Uuid::new_v4();
+        let rel = dummy_parquet(dir.path(), quali, lap_id, b"q");
+        db.insert_lap_with_id(
+            lap_id, quali, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Qualifying,
+        )
+        .unwrap();
+
+        // Legacy: session_kind set but laps have no stint_kind.
+        let legacy = db
+            .create_session_with_kind(
+                GameId::Acc, "spa", "Spa", "Ferrari", "1.0", "Dmytro",
+                SessionKind::Race,
+            )
+            .unwrap();
+        insert_valid_lap(&db, dir.path(), legacy, 100_000, b"r");
+
+        let by_id: std::collections::HashMap<Uuid, Vec<SessionKind>> = db
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, s.session_kinds))
+            .collect();
+        assert_eq!(by_id[&quali], vec![SessionKind::Qualifying]);
+        assert_eq!(
+            by_id[&legacy],
+            vec![SessionKind::Race],
+            "falls back to the entry kind when laps predate stint_kind"
+        );
+        assert_eq!(
+            db.get_session(quali).unwrap().unwrap().session_kinds,
+            vec![SessionKind::Qualifying],
+        );
     }
 
     #[test]

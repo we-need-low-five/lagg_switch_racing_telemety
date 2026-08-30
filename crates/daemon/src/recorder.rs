@@ -6,8 +6,8 @@ use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
     channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, session_car_changed,
-    session_track_changed, AdapterEvent, GameAdapter, GameId, RecordingStatus, SessionInfo,
-    TelemetrySample,
+    session_kind_changed, session_track_changed, AdapterEvent, GameAdapter, GameId, RecordingStatus,
+    SessionInfo, SessionKind, TelemetrySample,
 };
 use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
@@ -44,6 +44,11 @@ pub struct RecordingService {
     abandon_deadline: Instant,
     last_live_physics: Instant,
     current_stint: u32,
+    /// Weekend phase the current stint belongs to. Set from the session's first
+    /// `SessionInfo` and updated when the sim moves Practice → Qualifying → Race
+    /// on the same track and car (that phase change rolls a new stint rather
+    /// than a new session). Stamped on every lap of the stint.
+    current_stint_kind: SessionKind,
     laps_in_current_stint: bool,
     stint_gap_open: bool,
     stint_gap_during_lap: bool,
@@ -72,6 +77,7 @@ impl RecordingService {
             abandon_deadline: far_future(),
             last_live_physics: Instant::now(),
             current_stint: 1,
+            current_stint_kind: SessionKind::Unknown,
             laps_in_current_stint: false,
             stint_gap_open: false,
             stint_gap_during_lap: false,
@@ -181,12 +187,37 @@ impl RecordingService {
             return self.start_session(info);
         }
 
+        // Same track and car, new weekend phase (Practice → Qualifying → Race):
+        // keep the one recording and roll onto a fresh, phase-labelled stint.
+        let phase_changed = self
+            .session_info
+            .as_ref()
+            .is_some_and(|current| session_kind_changed(current, &info));
+        if phase_changed {
+            return Ok(self.begin_phase_stint(info.session_kind));
+        }
+
         if let Some(session_id) = self.session_id {
             let current = self.session_info.as_ref();
+            let current_kind = current.map_or(SessionKind::Unknown, |c| c.session_kind);
             let needs_update = current.is_none_or(|current| {
-                current.track.trim().is_empty() && !info.track.trim().is_empty()
+                (current.track.trim().is_empty() && !info.track.trim().is_empty())
+                    || (current_kind == SessionKind::Unknown
+                        && info.session_kind != SessionKind::Unknown)
             });
             if needs_update {
+                // Never regress a known kind to Unknown on a plain metadata fill-in.
+                let session_kind = match info.session_kind {
+                    SessionKind::Unknown => current_kind,
+                    known => known,
+                };
+                // The sim only just named the phase the current stint has been
+                // running in — label its laps too.
+                if current_kind == SessionKind::Unknown
+                    && session_kind != SessionKind::Unknown
+                {
+                    self.current_stint_kind = session_kind;
+                }
                 self.db.lock().update_session_metadata(
                     session_id,
                     &info.track_id,
@@ -194,8 +225,12 @@ impl RecordingService {
                     &info.car,
                     &info.game_version,
                     &info.player_name,
+                    session_kind,
                 )?;
-                self.session_info = Some(info);
+                self.session_info = Some(SessionInfo {
+                    session_kind,
+                    ..info
+                });
             }
         }
 
@@ -206,15 +241,17 @@ impl RecordingService {
         if info.track.trim().is_empty() || info.car.trim().is_empty() {
             return Ok(None);
         }
-        let id = self.db.lock().create_session(
+        let id = self.db.lock().create_session_with_kind(
             info.game,
             &info.track_id,
             &info.track,
             &info.car,
             &info.game_version,
             &info.player_name,
+            info.session_kind,
         )?;
         self.session_id = Some(id);
+        self.current_stint_kind = info.session_kind;
         self.session_info = Some(info);
         self.paused = false;
         self.samples_recorded = 0;
@@ -253,25 +290,56 @@ impl RecordingService {
         self.last_live_physics = now;
     }
 
-    /// Returns a notification when the gap actually splits the stint.
-    fn open_stint_gap(&mut self) -> Option<String> {
-        let mut notification = None;
-        if self.laps_in_current_stint {
-            self.current_stint += 1;
-            self.laps_in_current_stint = false;
-            self.stint_break_armed = true;
-            notification = Some(format!("Stint {} — break detected", self.current_stint));
+    /// Roll onto the next stint if the current one has persisted laps to
+    /// separate from. `arm_break` measures the resume gap as a break length
+    /// (a real physics freeze); a clean phase change passes `false`. Returns
+    /// whether the stint number advanced.
+    fn advance_stint(&mut self, arm_break: bool) -> bool {
+        if !self.laps_in_current_stint {
+            return false;
         }
+        self.current_stint += 1;
+        self.laps_in_current_stint = false;
+        self.stint_break_armed = arm_break;
+        true
+    }
+
+    /// A lap in progress when the stint boundary lands has a truncated trace and
+    /// can't be trusted as a clean lap.
+    fn discard_in_progress_lap(&mut self) {
         if !self.current_lap_samples.is_empty() {
-            // The freeze interrupted a lap already in progress. Its telemetry
-            // trace is now truncated, so the lap it completes into is not a
-            // clean lap — flag it so flush_lap marks it invalid.
             self.stint_gap_during_lap = true;
         }
         self.current_lap_samples.clear();
+    }
+
+    /// Returns a notification when the gap actually splits the stint.
+    fn open_stint_gap(&mut self) -> Option<String> {
+        let notification = self
+            .advance_stint(true)
+            .then(|| format!("Stint {} — break detected", self.current_stint));
+        self.discard_in_progress_lap();
         self.stint_gap_open = true;
         self.heartbeat_deadline = far_future();
         notification
+    }
+
+    /// Handle a weekend phase change (Practice → Qualifying → Race) on the same
+    /// track and car: stay in the one recording, but start a fresh stint tagged
+    /// with the new phase. If the phase load froze physics long enough for the
+    /// heartbeat gap to already open a stint, that stint (and its measured
+    /// break) is kept and only re-labelled.
+    fn begin_phase_stint(&mut self, kind: SessionKind) -> Option<String> {
+        if !self.stint_gap_open {
+            self.advance_stint(false);
+            self.discard_in_progress_lap();
+        }
+        self.current_stint_kind = kind;
+        Some(format!(
+            "{} — recording continues (stint {})",
+            kind.label(),
+            self.current_stint
+        ))
     }
 
     /// Returns true when a lap was persisted.
@@ -317,6 +385,7 @@ impl RecordingService {
             &manifest,
             self.current_stint,
             stint_break_s,
+            self.current_stint_kind,
         ) {
             let _ = std::fs::remove_file(&abs);
             return Err(err);
@@ -347,6 +416,7 @@ impl RecordingService {
         self.heartbeat_deadline = far_future();
         self.abandon_deadline = far_future();
         self.current_stint = 1;
+        self.current_stint_kind = SessionKind::Unknown;
         self.laps_in_current_stint = false;
         self.stint_gap_open = false;
         self.stint_gap_during_lap = false;
@@ -466,6 +536,14 @@ mod tests {
             car: car.to_string(),
             game_version: "1.0".to_string(),
             player_name: "Tester".to_string(),
+            session_kind: SessionKind::Unknown,
+        }
+    }
+
+    fn session_info_kind(track: &str, kind: SessionKind) -> SessionInfo {
+        SessionInfo {
+            session_kind: kind,
+            ..session_info(track, track)
         }
     }
 
@@ -591,6 +669,76 @@ mod tests {
             assert_eq!(svc.db.lock().list_laps(session.id).unwrap()[0].stint, 1);
         }
         assert_eq!(svc.current_stint, 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn weekend_phases_stay_one_session_split_into_labelled_stints() {
+        // Practice → Qualifying → Race on the same track/car: one recording,
+        // each phase its own stint carrying the phase label.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Practice,
+        ))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        events.push(AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Qualifying,
+        )));
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        events.push(AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Race,
+        )));
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1, "the weekend is one recording");
+        let laps = svc.db.lock().list_laps(sessions[0].id).unwrap();
+        assert_eq!(laps.len(), 3);
+        assert_eq!(
+            laps.iter().map(|l| l.stint).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "each phase gets its own stint"
+        );
+        assert_eq!(
+            laps.iter().map(|l| l.stint_kind).collect::<Vec<_>>(),
+            vec![
+                Some(SessionKind::Practice),
+                Some(SessionKind::Qualifying),
+                Some(SessionKind::Race),
+            ],
+            "each stint carries its phase label"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn unknown_session_kind_does_not_split_or_bump_stint() {
+        // Sims that never report a session type: SessionInfo re-announces are
+        // plain metadata, no new session and no new stint.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        events.push(AdapterEvent::SessionInfo(session_info("monza", "Monza")));
+        events.extend(telemetry(6));
+        events.push(lap_completed(2, true));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1, "no session type means no split");
+        let laps = svc.db.lock().list_laps(sessions[0].id).unwrap();
+        assert_eq!(laps.len(), 2);
+        assert!(laps.iter().all(|l| l.stint == 1), "one stint");
+        assert!(laps.iter().all(|l| l.stint_kind.is_none()));
         drop(dir);
     }
 

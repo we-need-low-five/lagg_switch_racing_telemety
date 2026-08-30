@@ -80,9 +80,14 @@ pub const PACKET_ID_LAP_DATA: u8 = 2;
 pub const PACKET_ID_TELEMETRY: u8 = 6;
 
 /// Byte offset of `trackId` (int8) inside a `PacketSessionData`, measured from
-/// the start of the packet: header + weather(1) + trackTemp(1) + airTemp(1) +
+/// the end of the packet header: weather(1) + trackTemp(1) + airTemp(1) +
 /// totalLaps(1) + trackLength(2) + sessionType(1). Stable across F1 23–25.
 pub const SESSION_TRACK_ID_OFFSET: usize = 7;
+
+/// Byte offset of `sessionType` (uint8), from the end of the packet header —
+/// the byte immediately before `trackId`. F1 24/25: 1–4 practice, 5–14
+/// qualifying, 15–17 race, 18 time trial.
+pub const SESSION_TYPE_OFFSET: usize = SESSION_TRACK_ID_OFFSET - 1;
 
 pub fn sector_ms(ms_part: u16, min_part: u8) -> u32 {
     ms_part as u32 + (min_part as u32) * 60_000

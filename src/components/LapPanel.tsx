@@ -128,7 +128,9 @@ export function LapPanel({
                       onClick={(e) => e.stopPropagation()}
                     >
                       <td colSpan={9}>
-                        Stint {row.stint}
+                        {row.phaseLabel
+                          ? `${row.phaseLabel} · Stint ${row.stint}`
+                          : `Stint ${row.stint}`}
                         {row.breakS != null && (
                           <span className="stint-break">
                             {" "}

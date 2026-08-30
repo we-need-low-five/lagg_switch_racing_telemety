@@ -222,7 +222,9 @@ export function SessionReview() {
                     return (
                       <tr key={`stint-${row.stint}`} className="stint-separator">
                         <td colSpan={11}>
-                          Stint {row.stint}
+                          {row.phaseLabel
+                            ? `${row.phaseLabel} · Stint ${row.stint}`
+                            : `Stint ${row.stint}`}
                           {st && (
                             <span className="stint-break">
                               {" "}

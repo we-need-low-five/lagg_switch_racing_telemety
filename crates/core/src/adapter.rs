@@ -1,4 +1,4 @@
-use crate::schema::{GameId, LapSummary, SessionInfo, TelemetrySample};
+use crate::schema::{GameId, LapSummary, SessionInfo, SessionKind, TelemetrySample};
 
 #[derive(Debug, Clone)]
 pub enum AdapterEvent {
@@ -37,6 +37,16 @@ pub fn session_car_changed(current: &SessionInfo, incoming: &SessionInfo) -> boo
     let a = current.car.trim();
     let b = incoming.car.trim();
     !a.is_empty() && !b.is_empty() && !a.eq_ignore_ascii_case(b)
+}
+
+/// True when incoming telemetry reports a different, known session type than the
+/// open session — e.g. ACC moving Practice → Qualifying on the same track and
+/// car. Both sides must be a known kind; `Unknown` on either side never triggers
+/// (a sim that reports no session type must not spawn a session per poll).
+pub fn session_kind_changed(current: &SessionInfo, incoming: &SessionInfo) -> bool {
+    current.session_kind != SessionKind::Unknown
+        && incoming.session_kind != SessionKind::Unknown
+        && current.session_kind != incoming.session_kind
 }
 
 pub fn normalize_throttle(value: f32) -> f32 {
@@ -99,6 +109,7 @@ mod tests {
             car: "Ferrari".into(),
             game_version: "1".into(),
             player_name: "P".into(),
+            session_kind: crate::schema::SessionKind::Unknown,
         }
     }
 
@@ -153,5 +164,38 @@ mod tests {
     fn car_change_needs_both_sides_known() {
         assert!(!super::session_car_changed(&with_car(""), &with_car("Porsche")));
         assert!(!super::session_car_changed(&with_car("Ferrari"), &with_car("  ")));
+    }
+
+    fn with_kind(kind: crate::schema::SessionKind) -> crate::schema::SessionInfo {
+        crate::schema::SessionInfo {
+            session_kind: kind,
+            ..info("monza", "Monza")
+        }
+    }
+
+    #[test]
+    fn detects_session_kind_change() {
+        use crate::schema::SessionKind;
+        assert!(super::session_kind_changed(
+            &with_kind(SessionKind::Practice),
+            &with_kind(SessionKind::Qualifying),
+        ));
+        assert!(!super::session_kind_changed(
+            &with_kind(SessionKind::Race),
+            &with_kind(SessionKind::Race),
+        ));
+    }
+
+    #[test]
+    fn session_kind_change_needs_both_sides_known() {
+        use crate::schema::SessionKind;
+        assert!(!super::session_kind_changed(
+            &with_kind(SessionKind::Unknown),
+            &with_kind(SessionKind::Race),
+        ));
+        assert!(!super::session_kind_changed(
+            &with_kind(SessionKind::Practice),
+            &with_kind(SessionKind::Unknown),
+        ));
     }
 }

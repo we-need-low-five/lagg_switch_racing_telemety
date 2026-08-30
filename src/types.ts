@@ -1,5 +1,14 @@
 export type GameId = "acc" | "ac" | "lmu" | "f1_25";
 
+export type SessionKind =
+  | "unknown"
+  | "practice"
+  | "qualifying"
+  | "race"
+  | "hotlap"
+  | "time_attack"
+  | "other";
+
 export interface SessionRecord {
   id: string;
   game: GameId;
@@ -10,6 +19,10 @@ export interface SessionRecord {
   ended_at?: string | null;
   game_version: string;
   player_name: string;
+  /** Phase the session began as, when the sim reports it. */
+  session_kind?: SessionKind;
+  /** Every distinct phase the session's stints cover, in run order. */
+  session_kinds?: SessionKind[];
   lap_count: number;
   best_lap_time_ms?: number | null;
 }
@@ -38,6 +51,8 @@ export interface LapRecord {
   stint?: number;
   /** Seconds of frozen physics that opened this stint; only on the first lap of stints 2+. */
   stint_break_s?: number | null;
+  /** Weekend phase this stint belongs to, when the sim reports one. */
+  stint_kind?: SessionKind | null;
 }
 
 export interface DistanceSample {
@@ -143,6 +158,40 @@ export function gameLabel(game: GameId): string {
     case "f1_25":
       return "F1 25";
   }
+}
+
+/** Display label for a session type, or null when the sim never reported one. */
+export function sessionKindLabel(kind: SessionKind | undefined): string | null {
+  switch (kind) {
+    case "practice":
+      return "Practice";
+    case "qualifying":
+      return "Qualifying";
+    case "race":
+      return "Race";
+    case "hotlap":
+      return "Hotlap";
+    case "time_attack":
+      return "Time Attack";
+    default:
+      return null;
+  }
+}
+
+/** One label per phase a session covers (in run order), for the session card. */
+export function sessionPhaseLabels(session: {
+  session_kinds?: SessionKind[] | null;
+  session_kind?: SessionKind | null;
+}): string[] {
+  const kinds =
+    session.session_kinds && session.session_kinds.length > 0
+      ? session.session_kinds
+      : session.session_kind
+        ? [session.session_kind]
+        : [];
+  return kinds
+    .map((k) => sessionKindLabel(k ?? undefined))
+    .filter((l): l is string => l != null);
 }
 
 const VALID_GAME_IDS: GameId[] = ["acc", "ac", "lmu", "f1_25"];

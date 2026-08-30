@@ -1,3 +1,6 @@
+import type { SessionKind } from "../types";
+import { sessionKindLabel } from "../types";
+
 export function lapStint(lap: { stint?: number | null }): number {
   return lap.stint && lap.stint > 0 ? lap.stint : 1;
 }
@@ -21,11 +24,15 @@ export function formatStintBreak(seconds: number): string {
 }
 
 export type StintTableRow<T> =
-  | { kind: "separator"; stint: number; breakS?: number }
+  | { kind: "separator"; stint: number; breakS?: number; phaseLabel?: string }
   | { kind: "lap"; lap: T };
 
 export function lapsWithStintSeparators<
-  T extends { stint?: number | null; stint_break_s?: number | null },
+  T extends {
+    stint?: number | null;
+    stint_break_s?: number | null;
+    stint_kind?: SessionKind | null;
+  },
 >(laps: T[]): StintTableRow<T>[] {
   if (!sessionHasMultipleStints(laps)) {
     return laps.map((lap) => ({ kind: "lap" as const, lap }));
@@ -39,6 +46,7 @@ export function lapsWithStintSeparators<
         kind: "separator",
         stint,
         breakS: lap.stint_break_s ?? undefined,
+        phaseLabel: sessionKindLabel(lap.stint_kind ?? undefined) ?? undefined,
       });
       prev = stint;
     }

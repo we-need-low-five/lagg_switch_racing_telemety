@@ -31,6 +31,63 @@ impl GameId {
     }
 }
 
+/// Normalized session type across sims. Lets the recorder split a recording when
+/// the game moves Practice → Qualifying → Race on the same track and car (each
+/// phase restarts the game's lap counter, so without a split the lap numbers
+/// collide and later phases overwrite earlier ones in any number-keyed view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    #[default]
+    Unknown,
+    Practice,
+    Qualifying,
+    Race,
+    Hotlap,
+    TimeAttack,
+    /// A known-but-unmapped mode (drift, drag, …). Distinct from `Unknown` so a
+    /// transition into it still counts as a session boundary.
+    Other,
+}
+
+impl SessionKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SessionKind::Unknown | SessionKind::Other => "Session",
+            SessionKind::Practice => "Practice",
+            SessionKind::Qualifying => "Qualifying",
+            SessionKind::Race => "Race",
+            SessionKind::Hotlap => "Hotlap",
+            SessionKind::TimeAttack => "Time Attack",
+        }
+    }
+
+    /// Stable lowercase token for persistence.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionKind::Unknown => "unknown",
+            SessionKind::Practice => "practice",
+            SessionKind::Qualifying => "qualifying",
+            SessionKind::Race => "race",
+            SessionKind::Hotlap => "hotlap",
+            SessionKind::TimeAttack => "time_attack",
+            SessionKind::Other => "other",
+        }
+    }
+
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "practice" => SessionKind::Practice,
+            "qualifying" => SessionKind::Qualifying,
+            "race" => SessionKind::Race,
+            "hotlap" => SessionKind::Hotlap,
+            "time_attack" => SessionKind::TimeAttack,
+            "other" => SessionKind::Other,
+            _ => SessionKind::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub game: GameId,
@@ -41,6 +98,10 @@ pub struct SessionInfo {
     pub car: String,
     pub game_version: String,
     pub player_name: String,
+    /// Practice / Qualifying / Race, when the sim reports it. A change here (with
+    /// both sides known) is a session boundary even on the same track and car.
+    #[serde(default)]
+    pub session_kind: SessionKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +240,14 @@ pub struct SessionRecord {
     pub ended_at: Option<DateTime<Utc>>,
     pub game_version: String,
     pub player_name: String,
+    /// Phase the session began as (Practice / Qualifying / Race), if reported.
+    #[serde(default)]
+    pub session_kind: SessionKind,
+    /// Every distinct phase the session's stints cover, in the order they were
+    /// run. One entry for a single-phase session; several when a weekend was
+    /// recorded as one session. Empty when no phase was ever reported.
+    #[serde(default)]
+    pub session_kinds: Vec<SessionKind>,
     pub lap_count: u32,
     pub best_lap_time_ms: Option<u32>,
 }
@@ -209,6 +278,10 @@ pub struct LapRecord {
     /// the first lap of stints 2+, `None` otherwise (and on legacy rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stint_break_s: Option<u32>,
+    /// Weekend phase this lap's stint belongs to (Practice / Qualifying / Race),
+    /// when the sim reports one. `None` on legacy rows and untyped stints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stint_kind: Option<SessionKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,8 +3,25 @@ use chrono::Utc;
 use sim_capture_common::SharedMemoryView;
 use sim_core::{
     kmh_to_mps, normalize_brake, normalize_steering, normalize_throttle, AdapterEvent,
-    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, TelemetrySample,
+    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
 };
+
+/// Sentinel for "no `graphics.session` observed yet".
+const AC_SESSION_UNSET: i32 = i32::MIN;
+
+/// AC `graphics.session` (`AC_SESSION_TYPE`): -1 unknown, 0 practice, 1 qualify,
+/// 2 race, 3 hotlap, 4 time attack, 5 drift, 6 drag.
+fn ac_session_kind(session: i32) -> SessionKind {
+    match session {
+        0 => SessionKind::Practice,
+        1 => SessionKind::Qualifying,
+        2 => SessionKind::Race,
+        3 => SessionKind::Hotlap,
+        4 => SessionKind::TimeAttack,
+        5 | 6 => SessionKind::Other,
+        _ => SessionKind::Unknown,
+    }
+}
 
 pub struct AcAdapter {
     physics: Option<SharedMemoryView<AcPhysics>>,
@@ -14,6 +31,9 @@ pub struct AcAdapter {
     session_announced: bool,
     last_track_id: String,
     last_car: String,
+    /// `graphics.session` at the last announce. A change is a session boundary
+    /// even on the same track/car (each phase restarts the lap counter).
+    last_session: i32,
     last_packet_id: i32,
     stale_packet_polls: u32,
     sector_times: SectorTimes,
@@ -51,6 +71,7 @@ impl AcAdapter {
             session_announced: false,
             last_track_id: String::new(),
             last_car: String::new(),
+            last_session: AC_SESSION_UNSET,
             last_packet_id: -1,
             stale_packet_polls: 0,
             sector_times: SectorTimes {
@@ -107,6 +128,7 @@ impl GameAdapter for AcAdapter {
             self.session_announced = true;
             self.last_track_id = slugify_track_id(&statics.track_name());
             self.last_car = statics.car_name();
+            self.last_session = graphics.session;
             self.last_packet_id = physics.packet_id;
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Ac,
@@ -115,6 +137,7 @@ impl GameAdapter for AcAdapter {
                 car: self.last_car.clone(),
                 game_version: statics.game_version(),
                 player_name: statics.player_display(),
+                session_kind: ac_session_kind(graphics.session),
             });
         }
 
@@ -126,9 +149,14 @@ impl GameAdapter for AcAdapter {
         let car_changed = !car.trim().is_empty()
             && !self.last_car.trim().is_empty()
             && !self.last_car.eq_ignore_ascii_case(car.trim());
-        if graphics.status == AC_STATUS_LIVE && (track_changed || car_changed) {
+        // Each weekend phase (practice → qualify → race) restarts AC's lap
+        // counter, so a `graphics.session` change is its own session boundary.
+        let session_changed =
+            self.last_session != AC_SESSION_UNSET && graphics.session != self.last_session;
+        if graphics.status == AC_STATUS_LIVE && (track_changed || car_changed || session_changed) {
             self.last_track_id = track_id.clone();
             self.last_car = car.clone();
+            self.last_session = graphics.session;
             self.last_completed_laps = -1;
             self.last_packet_id = physics.packet_id;
             self.stale_packet_polls = 0;
@@ -141,6 +169,7 @@ impl GameAdapter for AcAdapter {
                 car,
                 game_version: statics.game_version(),
                 player_name: statics.player_display(),
+                session_kind: ac_session_kind(graphics.session),
             });
         }
 

@@ -1,12 +1,30 @@
 use crate::packets::{
     sector_ms, CarTelemetryData, LapData, PacketHeader, DEFAULT_PORT, PACKET_ID_LAP_DATA,
     PACKET_ID_MOTION, PACKET_ID_SESSION, PACKET_ID_TELEMETRY, SESSION_TRACK_ID_OFFSET,
+    SESSION_TYPE_OFFSET,
 };
 use chrono::Utc;
 use sim_core::{
     normalize_brake, normalize_steering, normalize_throttle, AdapterEvent, GameAdapter, GameId,
-    LapSummary, SectorTimes, SessionInfo, TelemetrySample,
+    LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
 };
+
+/// `PacketSessionData.m_sessionType` → [`SessionKind`] (F1 24/25 numbering).
+/// 0 = unknown; 1–4 practice; 5–14 the various qualifying formats; 15–17 race;
+/// 18 time trial. Older titles pack race/time-trial lower, but a wrong label is
+/// still a distinct value, so the phase split downstream is unaffected.
+fn f1_session_kind(session_type: u8) -> SessionKind {
+    match session_type {
+        1..=4 => SessionKind::Practice,
+        5..=14 => SessionKind::Qualifying,
+        15..=17 => SessionKind::Race,
+        18 => SessionKind::TimeAttack,
+        _ => SessionKind::Unknown,
+    }
+}
+
+/// Sentinel for "no session packet seen yet".
+const F1_SESSION_TYPE_UNSET: i16 = -1;
 use socket2::{Domain, Socket, Type};
 use std::mem::{size_of, MaybeUninit};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -32,8 +50,13 @@ pub struct F1Adapter {
     session_announced: bool,
     /// Slug of the announced track, for detecting a mid-session track change.
     last_track_id: String,
+    /// `m_sessionType` at the last announce; `F1_SESSION_TYPE_UNSET` until then.
+    /// A change (Practice → Qualifying → Race) is its own session boundary.
+    last_session_type: i16,
     /// `(slug, display)` from the most recent session packet, if a known id.
     parsed_track: Option<(String, String)>,
+    /// `m_sessionType` from the most recent session packet (0 until one is seen).
+    parsed_session_type: u8,
     latest_lap: Option<LapData>,
     latest_telemetry: Option<CarTelemetryData>,
     latest_motion: Option<(f32, f32, f32)>,
@@ -102,7 +125,9 @@ impl F1Adapter {
             completed_lap_invalid: 0,
             session_announced: false,
             last_track_id: String::new(),
+            last_session_type: F1_SESSION_TYPE_UNSET,
             parsed_track: None,
+            parsed_session_type: 0,
             latest_lap: None,
             latest_telemetry: None,
             latest_motion: None,
@@ -178,6 +203,10 @@ impl F1Adapter {
     }
 
     fn parse_session(&mut self, buf: &[u8], len: usize) {
+        let type_offset = size_of::<PacketHeader>() + SESSION_TYPE_OFFSET;
+        if type_offset < len {
+            self.parsed_session_type = buf[type_offset];
+        }
         let offset = size_of::<PacketHeader>() + SESSION_TRACK_ID_OFFSET;
         if offset >= len {
             return;
@@ -197,7 +226,7 @@ impl F1Adapter {
             .unwrap_or_else(|| (String::new(), "F1 25 Session".to_string()))
     }
 
-    fn session_info(track_id: String, track: String) -> SessionInfo {
+    fn session_info(track_id: String, track: String, session_kind: SessionKind) -> SessionInfo {
         SessionInfo {
             game: GameId::F1_25,
             track_id,
@@ -205,6 +234,7 @@ impl F1Adapter {
             car: "Player Car".to_string(),
             game_version: "F1 25".to_string(),
             player_name: "Player".to_string(),
+            session_kind,
         }
     }
 
@@ -271,18 +301,31 @@ impl GameAdapter for F1Adapter {
         };
 
         let (track_id, track_name) = self.current_track();
+        let session_type = self.parsed_session_type;
+        let session_kind = f1_session_kind(session_type);
 
         if !self.session_announced {
             self.session_announced = true;
             self.last_track_id = track_id.clone();
-            return AdapterEvent::SessionInfo(Self::session_info(track_id, track_name));
+            self.last_session_type = session_type as i16;
+            return AdapterEvent::SessionInfo(Self::session_info(
+                track_id,
+                track_name,
+                session_kind,
+            ));
         }
 
         // Re-announce once the real track becomes known (announced with the
-        // placeholder), or when the player switches track mid-run. The stale
-        // placeholder session, if any, is lapless and gets pruned.
-        if !track_id.is_empty() && !self.last_track_id.eq_ignore_ascii_case(&track_id) {
+        // placeholder), when the player switches track mid-run, or when the
+        // weekend moves to a new phase (Practice → Qualifying → Race) — each
+        // phase restarts F1's lap counter. Any stale lapless session is pruned.
+        let track_switched =
+            !track_id.is_empty() && !self.last_track_id.eq_ignore_ascii_case(&track_id);
+        let session_switched = self.last_session_type != F1_SESSION_TYPE_UNSET
+            && session_type as i16 != self.last_session_type;
+        if track_switched || session_switched {
             self.last_track_id = track_id.clone();
+            self.last_session_type = session_type as i16;
             self.last_lap_num = 0;
             self.completed_lap_invalid = 0;
             self.sector_times = SectorTimes {
@@ -290,7 +333,11 @@ impl GameAdapter for F1Adapter {
                 s2_ms: None,
                 s3_ms: None,
             };
-            return AdapterEvent::SessionInfo(Self::session_info(track_id, track_name));
+            return AdapterEvent::SessionInfo(Self::session_info(
+                track_id,
+                track_name,
+                session_kind,
+            ));
         }
 
         if self.last_lap_num > 0 && lap.current_lap_num > self.last_lap_num {
@@ -412,7 +459,12 @@ mod tests {
     use super::*;
 
     fn session_packet(track_id: i8) -> Vec<u8> {
+        session_packet_typed(track_id, 0)
+    }
+
+    fn session_packet_typed(track_id: i8, session_type: u8) -> Vec<u8> {
         let mut buf = vec![0u8; size_of::<PacketHeader>() + SESSION_TRACK_ID_OFFSET + 1];
+        buf[size_of::<PacketHeader>() + SESSION_TYPE_OFFSET] = session_type;
         let last = buf.len() - 1;
         buf[last] = track_id as u8;
         buf
@@ -424,6 +476,24 @@ mod tests {
         assert_eq!(f1_track(0), Some(("melbourne", "Melbourne")));
         assert_eq!(f1_track(-1), None);
         assert_eq!(f1_track(120), None);
+    }
+
+    #[test]
+    fn f1_session_kind_maps_phase_ranges() {
+        assert_eq!(f1_session_kind(0), SessionKind::Unknown);
+        assert_eq!(f1_session_kind(2), SessionKind::Practice);
+        assert_eq!(f1_session_kind(6), SessionKind::Qualifying);
+        assert_eq!(f1_session_kind(15), SessionKind::Race);
+        assert_eq!(f1_session_kind(18), SessionKind::TimeAttack);
+    }
+
+    #[test]
+    fn parse_session_reads_the_session_type() {
+        let mut a = F1Adapter::new();
+        let quali = session_packet_typed(11, 6);
+        a.parse_session(&quali, quali.len());
+        assert_eq!(a.parsed_session_type, 6);
+        assert_eq!(f1_session_kind(a.parsed_session_type), SessionKind::Qualifying);
     }
 
     #[test]

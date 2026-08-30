@@ -14,7 +14,7 @@ import { OverflowMenu } from "../components/OverflowMenu";
 import { formatCarName } from "../lib/formatCarName";
 import { sessionBundleFileName } from "../lib/sessionBundleName";
 import type { RecordingStatus, SessionRecord } from "../types";
-import { formatLapTime, gameLabel } from "../types";
+import { formatLapTime, gameLabel, sessionPhaseLabels } from "../types";
 
 export function Sessions() {
   const navigate = useNavigate();
@@ -165,7 +165,14 @@ export function Sessions() {
                 {new Date(session.started_at).toLocaleString()}
               </span>
             </div>
-            <h3>{session.track || "Unknown track"}</h3>
+            <div className="session-card-title">
+              <h3>{session.track || "Unknown track"}</h3>
+              {sessionPhaseLabels(session).map((label) => (
+                <span key={label} className="badge">
+                  {label}
+                </span>
+              ))}
+            </div>
             <p>{formatCarName(session.car)}</p>
             <div className="session-stats">
               <span>{session.lap_count} laps</span>
