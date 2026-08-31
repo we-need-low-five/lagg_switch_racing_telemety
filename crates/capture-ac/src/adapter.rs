@@ -3,7 +3,8 @@ use chrono::Utc;
 use sim_capture_common::SharedMemoryView;
 use sim_core::{
     kmh_to_mps, normalize_brake, normalize_steering, normalize_throttle, AdapterEvent,
-    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
+    GameAdapter, GameId, LapSummary, PitCycleDetector, SectorTimes, SessionInfo, SessionKind,
+    TelemetrySample,
 };
 
 /// Sentinel for "no `graphics.session` observed yet".
@@ -39,6 +40,9 @@ pub struct AcAdapter {
     sector_times: SectorTimes,
     last_sector_index: i32,
     current_lap_in_pit: bool,
+    /// Pit-box cycle (return-to-garage / pit stop) → new stint. AC's shared
+    /// memory has no pit-lane flag, so this keys off `graphics.is_in_pit`.
+    pit_cycle: PitCycleDetector,
 }
 
 /// AC `graphics.status`: 0 OFF, 1 REPLAY, 2 LIVE, 3 PAUSE. We only treat LIVE
@@ -81,6 +85,7 @@ impl AcAdapter {
             },
             last_sector_index: -1,
             current_lap_in_pit: false,
+            pit_cycle: PitCycleDetector::new(),
         }
     }
 
@@ -110,6 +115,10 @@ impl GameAdapter for AcAdapter {
         self.physics.is_some()
     }
 
+    fn detects_pit_stints(&self) -> bool {
+        true
+    }
+
     fn poll(&mut self) -> AdapterEvent {
         if !self.connect() {
             return AdapterEvent::Disconnected;
@@ -126,6 +135,7 @@ impl GameAdapter for AcAdapter {
                 return AdapterEvent::Heartbeat;
             }
             self.session_announced = true;
+            self.pit_cycle.reset();
             self.last_track_id = slugify_track_id(&statics.track_name());
             self.last_car = statics.car_name();
             self.last_session = graphics.session;
@@ -162,6 +172,7 @@ impl GameAdapter for AcAdapter {
             self.stale_packet_polls = 0;
             self.last_sector_index = -1;
             self.current_lap_in_pit = false;
+            self.pit_cycle.reset();
             return AdapterEvent::SessionInfo(SessionInfo {
                 game: GameId::Ac,
                 track_id,
@@ -212,6 +223,8 @@ impl GameAdapter for AcAdapter {
                 s3_ms: None,
             };
             self.last_sector_index = -1;
+            // Out / in-laps are recorded invalid but don't arm the pit-cycle split.
+            self.pit_cycle.lap_completed(self.current_lap_in_pit);
             self.current_lap_in_pit = false;
             self.last_completed_laps = graphics.completed_laps;
             return AdapterEvent::LapCompleted(summary);
@@ -228,6 +241,11 @@ impl GameAdapter for AcAdapter {
 
         if graphics.is_in_pit != 0 {
             self.current_lap_in_pit = true;
+        }
+
+        // Return-to-garage / pit stop after a real lap → new stint.
+        if self.pit_cycle.left_pits(graphics.is_in_pit != 0) {
+            return AdapterEvent::StintBoundary;
         }
 
         if graphics.current_sector_index != self.last_sector_index

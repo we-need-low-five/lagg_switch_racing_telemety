@@ -106,7 +106,11 @@ impl RecordingService {
             && !self.stint_gap_open
             && Instant::now() > self.heartbeat_deadline
         {
-            notification = self.open_stint_gap();
+            let pit_aware = self
+                .adapter
+                .as_ref()
+                .is_some_and(|a| a.detects_pit_stints());
+            notification = self.open_stint_gap(pit_aware);
         }
 
         let event = {
@@ -153,6 +157,14 @@ impl RecordingService {
                 }
                 self.current_lap_samples.clear();
                 self.current_lap_number = summary.lap_number + 1;
+            }
+            AdapterEvent::StintBoundary => {
+                // The car came back out of the pits / garage. Adapters that emit
+                // this are pit-aware, so a concurrent freeze gap never advanced
+                // the stint itself — this event is what rolls it. `mark_live_physics`
+                // also lifts any freeze pause.
+                self.mark_live_physics();
+                notification = self.begin_pit_stint();
             }
             AdapterEvent::Telemetry(sample) => {
                 self.mark_live_physics();
@@ -313,15 +325,35 @@ impl RecordingService {
         self.current_lap_samples.clear();
     }
 
-    /// Returns a notification when the gap actually splits the stint.
-    fn open_stint_gap(&mut self) -> Option<String> {
-        let notification = self
-            .advance_stint(true)
-            .then(|| format!("Stint {} — break detected", self.current_stint));
+    /// A live-physics freeze reached `LIVE_PHYSICS_TIMEOUT`. Always taints an
+    /// in-progress lap (its trace has a hole) and pauses the heartbeat until the
+    /// sim resumes. Whether it also *splits the stint* depends on the game:
+    /// when the adapter has real pit/garage detection (`pit_aware`), a bare
+    /// freeze — alt-tab, pause menu, sim hitch — is not a new stint and the
+    /// `StintBoundary` event is the only thing that rolls one.
+    ///
+    /// Returns a notification only when the freeze itself splits the stint.
+    fn open_stint_gap(&mut self, pit_aware: bool) -> Option<String> {
+        let notification = if pit_aware {
+            None
+        } else {
+            self.advance_stint(true)
+                .then(|| format!("Stint {} — break detected", self.current_stint))
+        };
         self.discard_in_progress_lap();
         self.stint_gap_open = true;
         self.heartbeat_deadline = far_future();
         notification
+    }
+
+    /// The sim reported the car cycling out through the pit lane / garage
+    /// (return-to-garage, or a normal pit stop) after at least one timed lap.
+    /// Roll onto a fresh stint with no break time. No-op until the stint has a
+    /// persisted lap to separate from (`advance_stint`).
+    fn begin_pit_stint(&mut self) -> Option<String> {
+        let bumped = self.advance_stint(false);
+        self.discard_in_progress_lap();
+        bumped.then(|| format!("Stint {} — out of the pits", self.current_stint))
     }
 
     /// Handle a weekend phase change (Practice → Qualifying → Race) on the same
@@ -502,12 +534,23 @@ mod tests {
     /// Yields one scripted event per `poll`, then `None` forever.
     struct FakeAdapter {
         events: VecDeque<AdapterEvent>,
+        pit_aware: bool,
     }
 
     impl FakeAdapter {
         fn new(events: Vec<AdapterEvent>) -> Self {
             Self {
                 events: events.into(),
+                pit_aware: false,
+            }
+        }
+
+        /// A pit-aware adapter: a physics-freeze gap no longer splits the stint;
+        /// only a `StintBoundary` event does.
+        fn new_pit_aware(events: Vec<AdapterEvent>) -> Self {
+            Self {
+                events: events.into(),
+                pit_aware: true,
             }
         }
     }
@@ -518,6 +561,9 @@ mod tests {
         }
         fn is_active(&self) -> bool {
             true
+        }
+        fn detects_pit_stints(&self) -> bool {
+            self.pit_aware
         }
         fn poll(&mut self) -> AdapterEvent {
             self.events.pop_front().unwrap_or(AdapterEvent::None)
@@ -611,6 +657,17 @@ mod tests {
             Arc::new(Mutex::new(db)),
             dir.path().to_path_buf(),
             Box::new(FakeAdapter::new(events)),
+        );
+        (dir, svc)
+    }
+
+    fn service_pit_aware(events: Vec<AdapterEvent>) -> (tempfile::TempDir, RecordingService) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("simtelemetry.db")).unwrap();
+        let svc = RecordingService::with_adapter(
+            Arc::new(Mutex::new(db)),
+            dir.path().to_path_buf(),
+            Box::new(FakeAdapter::new_pit_aware(events)),
         );
         (dir, svc)
     }
@@ -778,6 +835,112 @@ mod tests {
         assert_eq!(
             laps[2].stint_break_s, None,
             "only the first lap of the stint carries the break marker"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn pit_out_boundary_opens_a_break_less_stint() {
+        // Return-to-garage: adapter emits StintBoundary, no physics freeze.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        events.push(AdapterEvent::StintBoundary);
+        events.extend(telemetry(6));
+        events.push(lap_completed(2, true));
+        let (dir, mut svc) = service_pit_aware(events);
+
+        run(&mut svc);
+
+        assert_eq!(svc.current_stint, 2);
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        assert_eq!(laps.len(), 2);
+        assert_eq!(laps[0].stint, 1);
+        assert_eq!(laps[1].stint, 2, "lap after the pit-out belongs to stint 2");
+        assert_eq!(
+            laps[1].stint_break_s, None,
+            "a pit-out with live physics records no break length"
+        );
+        assert!(laps[1].valid, "the flyer after the out-lap stays valid");
+        drop(dir);
+    }
+
+    #[test]
+    fn pit_out_boundary_without_laps_does_not_bump_stint() {
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(3)); // out-lap in progress, no completed lap yet
+        events.push(AdapterEvent::StintBoundary);
+        let (dir, mut svc) = service_pit_aware(events);
+
+        run(&mut svc);
+
+        assert_eq!(
+            svc.current_stint, 1,
+            "no timed lap in the stint yet, so nothing to split"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn pit_aware_adapter_does_not_split_on_a_bare_freeze() {
+        // A pit-aware game: alt-tab / pause / sim hitch freezes physics past the
+        // timeout but the car never cycled the pits — no new stint.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service_pit_aware(events);
+        run(&mut svc);
+        assert_eq!(svc.current_stint, 1);
+
+        svc.expire_heartbeat();
+        let note = svc.tick().unwrap();
+        assert_eq!(svc.current_stint, 1, "a bare freeze is not a stint boundary");
+        assert_eq!(note, None);
+        assert!(svc.stint_gap_open, "the freeze still pauses the heartbeat");
+
+        // Resume with more laps — still stint 1.
+        let mut resume = telemetry(6);
+        resume.push(lap_completed(2, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new_pit_aware(resume)));
+        run(&mut svc);
+
+        assert_eq!(svc.current_stint, 1);
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        assert_eq!(laps.len(), 2);
+        assert!(laps.iter().all(|l| l.stint == 1), "one continuous stint");
+        assert!(laps.iter().all(|l| l.stint_break_s.is_none()));
+        drop(dir);
+    }
+
+    #[test]
+    fn pit_aware_freeze_then_pit_out_splits_once() {
+        // RTG that also froze physics on the garage load: the freeze doesn't
+        // split, the following StintBoundary does — exactly one bump.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service_pit_aware(events);
+        run(&mut svc);
+
+        svc.expire_heartbeat();
+        let _ = svc.tick().unwrap();
+        assert_eq!(svc.current_stint, 1, "freeze alone doesn't split");
+
+        let mut resume = vec![AdapterEvent::StintBoundary];
+        resume.extend(telemetry(6));
+        resume.push(lap_completed(2, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new_pit_aware(resume)));
+        run(&mut svc);
+
+        assert_eq!(svc.current_stint, 2, "the pit-out rolls the stint, once");
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        assert_eq!(laps[1].stint, 2);
+        assert_eq!(
+            laps[1].stint_break_s, None,
+            "pit-out stints carry no break length"
         );
         drop(dir);
     }

@@ -7,6 +7,11 @@ pub enum AdapterEvent {
     Telemetry(TelemetrySample),
     LapStarted { lap_number: u32 },
     LapCompleted(LapSummary),
+    /// The car cycled out through the pit lane / garage (e.g. ACC
+    /// return-to-garage, or a normal pit stop) after completing at least one
+    /// timed lap. The recorder rolls onto a fresh stint without measuring a
+    /// physics-freeze break.
+    StintBoundary,
     Heartbeat,
     Disconnected,
 }
@@ -15,6 +20,67 @@ pub trait GameAdapter: Send {
     fn game_id(&self) -> GameId;
     fn poll(&mut self) -> AdapterEvent;
     fn is_active(&self) -> bool;
+
+    /// Whether this adapter emits [`AdapterEvent::StintBoundary`] for pit-lane /
+    /// garage cycles. When true, the recorder must **not** also split stints on
+    /// a physics-freeze gap — with real pit detection that heuristic only
+    /// manufactures phantom stints from alt-tabs, pause menus and sim hitches.
+    fn detects_pit_stints(&self) -> bool {
+        false
+    }
+}
+
+/// Detects a pit-lane / garage cycle: the car went into the pits (or garage
+/// stall) after completing at least one flying lap, then came back out.
+/// Emitting an [`AdapterEvent::StintBoundary`] on that trailing edge lets the
+/// recorder split a stint without leaning on a physics-freeze heuristic.
+///
+/// Each adapter feeds it whatever "in the pits" signal its sim exposes
+/// (`is_in_pit_lane`, `mInPits`, `pit_status`, …) plus a per-lap "was this an
+/// out/in-lap" flag.
+#[derive(Debug, Default, Clone)]
+pub struct PitCycleDetector {
+    in_pits_prev: bool,
+    visited: bool,
+    flying_laps: u32,
+}
+
+impl PitCycleDetector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a completed lap. Out / in-laps (`pitted`) don't count toward the
+    /// gate that a real run happened before a pit cycle can split the stint.
+    pub fn lap_completed(&mut self, pitted: bool) {
+        if !pitted {
+            self.flying_laps = self.flying_laps.saturating_add(1);
+        }
+    }
+
+    /// Feed the per-frame "car is in the pit lane / box / garage" flag. Returns
+    /// true exactly once — on the frame the car leaves the pits again — when at
+    /// least one flying lap has been completed since the last boundary.
+    pub fn left_pits(&mut self, in_pits: bool) -> bool {
+        if in_pits {
+            self.visited = true;
+        }
+        let left = self.in_pits_prev && !in_pits;
+        self.in_pits_prev = in_pits;
+        if left && self.visited && self.flying_laps > 0 {
+            self.visited = false;
+            self.flying_laps = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all state on a real session / track / car change so a stale pit
+    /// visit or lap tally can't leak into the next session.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// True when incoming telemetry is a different circuit than the open session.
@@ -197,5 +263,36 @@ mod tests {
             &with_kind(SessionKind::Practice),
             &with_kind(SessionKind::Unknown),
         ));
+    }
+
+    #[test]
+    fn pit_cycle_fires_once_on_leaving_after_a_flying_lap() {
+        let mut d = super::PitCycleDetector::new();
+        d.lap_completed(false); // one flying lap done
+        assert!(!d.left_pits(true), "entering the pits is not the edge");
+        assert!(!d.left_pits(true), "still in the pits");
+        assert!(d.left_pits(false), "leaving the pits splits the stint");
+        assert!(!d.left_pits(false), "only once per cycle");
+        assert!(!d.left_pits(true), "next visit re-arms");
+        assert!(!d.left_pits(false), "no flying lap since the last split");
+    }
+
+    #[test]
+    fn pit_cycle_needs_a_flying_lap_first() {
+        let mut d = super::PitCycleDetector::new();
+        // Straight out of the garage for the first out-lap.
+        assert!(!d.left_pits(true));
+        assert!(!d.left_pits(false), "session's first pit-out is not a split");
+    }
+
+    #[test]
+    fn pit_cycle_ignores_out_and_in_laps_for_the_gate() {
+        let mut d = super::PitCycleDetector::new();
+        d.lap_completed(true); // out-lap only, no real running
+        assert!(!d.left_pits(true));
+        assert!(!d.left_pits(false), "an out-lap alone doesn't arm a split");
+        d.lap_completed(false); // now a genuine flying lap
+        assert!(!d.left_pits(true));
+        assert!(d.left_pits(false));
     }
 }

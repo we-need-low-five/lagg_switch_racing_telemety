@@ -6,7 +6,8 @@ use chrono::Utc;
 use sim_capture_common::SharedMemoryMapping;
 use sim_core::{
     acc_cumulative_splits_to_sectors, normalize_brake, normalize_steering, normalize_throttle,
-    AdapterEvent, GameAdapter, GameId, LapSummary, SessionInfo, SessionKind, TelemetrySample,
+    AdapterEvent, GameAdapter, GameId, LapSummary, PitCycleDetector, SessionInfo, SessionKind,
+    TelemetrySample,
 };
 
 /// Sentinel for "no `ScoringInfoV01.mSession` observed yet".
@@ -46,6 +47,8 @@ pub struct LmuAdapter {
     last_lap: i32,
     /// OR of `mInPits` across the current lap — invalidates the lap on completion.
     pit_this_lap: bool,
+    /// Pit-lane / garage-stall cycle → new stint.
+    pit_cycle: PitCycleDetector,
     last_elapsed_time: f64,
     stale_frame_polls: u32,
 }
@@ -60,6 +63,7 @@ impl LmuAdapter {
             last_session: LMU_SESSION_UNSET,
             last_lap: -1,
             pit_this_lap: false,
+            pit_cycle: PitCycleDetector::new(),
             last_elapsed_time: f64::NAN,
             stale_frame_polls: 0,
         }
@@ -128,6 +132,10 @@ impl GameAdapter for LmuAdapter {
         self.mapping.is_some()
     }
 
+    fn detects_pit_stints(&self) -> bool {
+        true
+    }
+
     fn poll(&mut self) -> AdapterEvent {
         if !self.connect() {
             return AdapterEvent::Disconnected;
@@ -194,6 +202,7 @@ impl GameAdapter for LmuAdapter {
             self.last_session = m_session;
             self.last_lap = -1;
             self.pit_this_lap = false;
+            self.pit_cycle.reset();
             return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id, session_kind));
         }
 
@@ -213,12 +222,21 @@ impl GameAdapter for LmuAdapter {
             self.last_session = m_session;
             self.last_lap = -1;
             self.pit_this_lap = false;
+            self.pit_cycle.reset();
             return AdapterEvent::SessionInfo(Self::session_info(&tel, track_id, session_kind));
         }
 
-        let in_pits = scoring.as_ref().map(|s| s.mInPits != 0).unwrap_or(false);
+        let in_pits = scoring
+            .as_ref()
+            .map(|s| s.mInPits != 0 || s.mInGarageStall != 0)
+            .unwrap_or(false);
         if in_pits {
             self.pit_this_lap = true;
+        }
+
+        // Return-to-garage / pit stop after a real lap → new stint.
+        if self.pit_cycle.left_pits(in_pits) {
+            return AdapterEvent::StintBoundary;
         }
 
         let lap_number = tel.mLapNumber;
@@ -232,6 +250,8 @@ impl GameAdapter for LmuAdapter {
                 let completed = self.last_lap as u32;
                 self.last_lap = lap_number;
                 let pitted = std::mem::take(&mut self.pit_this_lap);
+                // Out / in-laps are recorded invalid but don't arm the pit-cycle split.
+                self.pit_cycle.lap_completed(pitted);
                 let lap_time_ms = (s.mLastLapTime * 1000.0).max(0.0) as u32;
                 let cum_s1 = (s.mLastSector1 > 0.0).then_some((s.mLastSector1 * 1000.0) as u32);
                 let cum_s2 = (s.mLastSector2 > 0.0).then_some((s.mLastSector2 * 1000.0) as u32);

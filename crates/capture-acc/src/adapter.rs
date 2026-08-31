@@ -16,7 +16,8 @@ use sim_core::{
 
     kmh_to_mps, normalize_brake, normalize_throttle, AdapterEvent,
 
-    GameAdapter, GameId, LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
+    GameAdapter, GameId, LapSummary, PitCycleDetector, SectorTimes, SessionInfo, SessionKind,
+    TelemetrySample,
 
 };
 
@@ -102,6 +103,27 @@ pub struct AccAdapter {
 
     lap_start_meta_captured: bool,
 
+    /// Adapter-owned lap counter. ACC's `completed_lap` stalls or restarts
+    /// across out-laps and return-to-garage, so lap numbers are minted here on
+    /// each emitted lap instead. Reset only on a real session / phase change.
+    lap_counter: u32,
+
+    /// `normalized_car_position` on the previous poll (`-1.0` until first read).
+    /// A high→low wrap is the start/finish line and drives the lap boundary
+    /// even when `completed_lap` never moved (unscored out-laps).
+    last_norm_pos: f32,
+
+    /// Largest `current_time` (live lap timer, ms) seen since the last
+    /// boundary. Fallback lap time when ACC's `last_time` is 0 / a sentinel.
+    max_current_time_ms: u32,
+
+    /// False while a just-taken boundary is still settling; blocks the
+    /// `completed_lap` delta and the S/F wrap from firing twice for one lap.
+    boundary_settled: bool,
+
+    /// Return-to-garage / pit-stop → new stint, off the `is_in_pit_lane` edge.
+    pit_cycle: PitCycleDetector,
+
 }
 
 
@@ -155,6 +177,16 @@ impl AccAdapter {
             lap_start_abs: None,
 
             lap_start_meta_captured: false,
+
+            lap_counter: 0,
+
+            last_norm_pos: -1.0,
+
+            max_current_time_ms: 0,
+
+            boundary_settled: true,
+
+            pit_cycle: PitCycleDetector::new(),
 
         }
 
@@ -242,6 +274,16 @@ impl AccAdapter {
 
         self.lap_start_meta_captured = false;
 
+        self.lap_counter = 0;
+
+        self.last_norm_pos = -1.0;
+
+        self.max_current_time_ms = 0;
+
+        self.boundary_settled = true;
+
+        self.pit_cycle.reset();
+
         self.sector_times = SectorTimes {
 
             s1_ms: None,
@@ -309,9 +351,14 @@ impl AccAdapter {
 
 
 
-    fn track_lap_state(&mut self, graphics: &GraphicsMap) {
+    fn track_lap_state(&mut self, graphics: &GraphicsMap, speed_kmh: f32) {
 
-        if !graphics.is_valid_lap {
+        // ACC keeps `is_valid_lap` at 0 whenever no flying lap is being timed —
+        // stationary, in the pit lane, or in the instant after crossing the
+        // line before the next lap's timing starts. A stopped car can't be
+        // invalidating the lap it already finished, so only honour the flag
+        // while the car is actually running a lap.
+        if !graphics.is_valid_lap && speed_kmh > 5.0 && !graphics.is_in_pit_lane {
 
             self.current_lap_valid = false;
 
@@ -327,78 +374,73 @@ impl AccAdapter {
 
 
 
-    fn lap_completed_event(&mut self, graphics: &GraphicsMap) -> Option<AdapterEvent> {
+    /// Emit the lap that just ended at a start/finish boundary. `poll` calls
+    /// this once per crossing, whether the boundary was seen as an ACC
+    /// `completed_lap` increment or as a `normalized_car_position` wrap.
+    ///
+    /// `lap_valid_snapshot` is `current_lap_valid` as of the previous tick — on
+    /// the boundary tick ACC's live `is_valid_lap` already describes the next
+    /// lap, so the finished lap is judged on the pre-tick value.
+    ///
+    /// Per-lap state is cleared even when no lap is emitted (no usable time,
+    /// e.g. the first wrap straight out of the garage).
+    fn finish_lap(
+        &mut self,
+        graphics: &GraphicsMap,
+        lap_valid_snapshot: bool,
+    ) -> Option<AdapterEvent> {
 
-        if self.last_completed_laps < 0 || graphics.completed_lap <= self.last_completed_laps {
+        // ACC reports `last_time` as 0 or a huge sentinel until a lap has been
+        // scored this run (out-laps, first lap after a return-to-garage). Fall
+        // back to the live lap timer's peak for those.
+        let acc_last = graphics.last_time;
+        let lap_time_ms = if (1_000..=1_800_000).contains(&acc_last) {
+            acc_last as u32
+        } else {
+            self.max_current_time_ms
+        };
 
-            return None;
-
-        }
-
-
-
-        let lap_number = self.last_completed_laps + 1;
-
-        let lap_time_ms = graphics.last_time.max(0) as u32;
-
-        let valid = lap_time_ms > 0
-
-            && self.current_lap_valid
-
-            && !self.current_lap_in_pit;
-
+        let in_pit = self.current_lap_in_pit;
         let sectors = sim_core::acc_cumulative_splits_to_sectors(
             self.sector_times.s1_ms,
             self.sector_times.s2_ms,
             lap_time_ms,
         );
+        let tyre_compound = self.lap_start_compound.take();
+        let tc_level = self.lap_start_tc.take();
+        let abs_level = self.lap_start_abs.take();
 
-        let summary = LapSummary {
-
-            lap_number: lap_number as u32,
-
-            lap_time_ms,
-
-            valid,
-
-            sectors,
-
-            tyre_compound: self.lap_start_compound.take(),
-
-            tc_level: self.lap_start_tc.take(),
-
-            abs_level: self.lap_start_abs.take(),
-
-            fuel_used_l: None,
-
-        };
-
-
-
+        // Reset per-lap state regardless of whether a lap is emitted.
         self.lap_start_meta_captured = false;
-
         self.sector_times = SectorTimes {
-
             s1_ms: None,
-
             s2_ms: None,
-
             s3_ms: None,
-
         };
-
-        self.last_completed_laps = graphics.completed_lap;
-
         self.last_sector_index = graphics.current_sector_index;
-
         self.current_lap_valid = true;
-
         self.current_lap_in_pit = false;
+        self.max_current_time_ms = 0;
 
+        if lap_time_ms < 1_000 {
+            return None;
+        }
 
+        self.lap_counter += 1;
+        // Out / in-laps are recorded (tagged invalid) but don't arm the
+        // return-to-garage stint split.
+        self.pit_cycle.lap_completed(in_pit);
 
-        Some(AdapterEvent::LapCompleted(summary))
-
+        Some(AdapterEvent::LapCompleted(LapSummary {
+            lap_number: self.lap_counter,
+            lap_time_ms,
+            valid: lap_valid_snapshot && !in_pit,
+            sectors,
+            tyre_compound,
+            tc_level,
+            abs_level,
+            fuel_used_l: None,
+        }))
     }
 
 
@@ -423,6 +465,15 @@ impl AccAdapter {
 
         self.lap_start_meta_captured = false;
 
+        // Per-lap transients only. `lap_counter` and `pit_cycle` deliberately
+        // survive the AC_PAUSE blip that a return-to-garage triggers, so the
+        // pit-out stint split still fires.
+        self.last_norm_pos = -1.0;
+
+        self.max_current_time_ms = 0;
+
+        self.boundary_settled = true;
+
         self.sector_times = SectorTimes {
 
             s1_ms: None,
@@ -433,6 +484,16 @@ impl AccAdapter {
 
         };
 
+    }
+
+
+
+    /// Clear the recording-scoped lap/stint counters. Called only on a real
+    /// session boundary (first announce, or a track / car / weekend-phase
+    /// change) — never on the transient AC_PAUSE seen during return-to-garage.
+    fn reset_stint_tracking(&mut self) {
+        self.lap_counter = 0;
+        self.pit_cycle.reset();
     }
 
 
@@ -513,6 +574,12 @@ impl GameAdapter for AccAdapter {
 
 
 
+    fn detects_pit_stints(&self) -> bool {
+        true
+    }
+
+
+
     fn poll(&mut self) -> AdapterEvent {
 
         if !self.connect() {
@@ -564,6 +631,8 @@ impl GameAdapter for AccAdapter {
             }
 
             self.session_announced = true;
+
+            self.reset_stint_tracking();
 
             self.last_completed_laps = graphics.completed_lap;
 
@@ -632,6 +701,8 @@ impl GameAdapter for AccAdapter {
 
                 self.reset_lap_progress();
 
+                self.reset_stint_tracking();
+
                 self.last_track_id = info.track_id.clone();
 
                 self.last_car = info.car.clone();
@@ -664,22 +735,6 @@ impl GameAdapter for AccAdapter {
 
 
 
-        self.update_sector_times(&graphics);
-
-        self.track_lap_state(&graphics);
-
-        self.capture_lap_start_meta(&graphics);
-
-
-
-        if let Some(event) = self.lap_completed_event(&graphics) {
-
-            return event;
-
-        }
-
-
-
         let physics = match parse_physics_map(self.physics_reader.as_ref().unwrap()) {
 
             Ok(physics) => physics,
@@ -693,6 +748,67 @@ impl GameAdapter for AccAdapter {
             }
 
         };
+
+
+
+        // Validity as of the previous tick, before this tick's reading is
+        // folded in. The completion verdict below uses this so a post-line
+        // `is_valid_lap == 0` (which belongs to the next lap) can't retroactively
+        // invalidate the lap that just finished.
+        let lap_valid_before_tick = self.current_lap_valid;
+
+        self.update_sector_times(&graphics);
+
+        self.track_lap_state(&graphics, physics.speed_kmh);
+
+        self.capture_lap_start_meta(&graphics);
+
+        // Running peak of the live lap timer — fallback lap time for a wrap
+        // that ACC never scored (out-laps).
+        self.max_current_time_ms = self
+            .max_current_time_ms
+            .max(graphics.current_time.max(0) as u32);
+
+
+
+        // Lap boundary: the car wrapped past the start/finish line, or ACC
+        // scored a lap we didn't catch as a wrap (a poll gap). Take it once per
+        // crossing — `boundary_settled` clears until the car is unambiguously
+        // into the next lap so the two signals can't double-fire.
+        let norm = graphics.normalized_car_position;
+        // `last_norm_pos` starts at -1.0, so `> 0.90` also rules out the sentinel.
+        let crossed_sf = self.last_norm_pos > 0.90 && norm < 0.10;
+        self.last_norm_pos = norm;
+
+        let acc_scored = self.last_completed_laps >= 0
+            && graphics.completed_lap > self.last_completed_laps;
+
+        if (crossed_sf || acc_scored) && self.boundary_settled {
+            self.boundary_settled = false;
+            self.last_completed_laps = graphics.completed_lap;
+            if let Some(event) = self.finish_lap(&graphics, lap_valid_before_tick) {
+                return event;
+            }
+        } else if acc_scored {
+            // Boundary already taken for this crossing; keep the tracker in step.
+            self.last_completed_laps = graphics.completed_lap;
+        }
+        if (0.20..0.80).contains(&norm) {
+            self.boundary_settled = true;
+        }
+
+
+
+        // Return-to-garage / pit stop: once the car is back out of the pit lane
+        // and has at least one flying lap behind it this stint, roll a new one.
+        if self
+            .pit_cycle
+            .left_pits(graphics.is_in_pit || graphics.is_in_pit_lane)
+        {
+            // The out-lap now starting belongs to the new stint.
+            self.current_lap_valid = true;
+            return AdapterEvent::StintBoundary;
+        }
 
 
 

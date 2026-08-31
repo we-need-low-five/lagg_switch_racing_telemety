@@ -6,7 +6,7 @@ use crate::packets::{
 use chrono::Utc;
 use sim_core::{
     normalize_brake, normalize_steering, normalize_throttle, AdapterEvent, GameAdapter, GameId,
-    LapSummary, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
+    LapSummary, PitCycleDetector, SectorTimes, SessionInfo, SessionKind, TelemetrySample,
 };
 
 /// `PacketSessionData.m_sessionType` → [`SessionKind`] (F1 24/25 numbering).
@@ -61,6 +61,10 @@ pub struct F1Adapter {
     latest_telemetry: Option<CarTelemetryData>,
     latest_motion: Option<(f32, f32, f32)>,
     sector_times: SectorTimes,
+    /// OR of `pit_status != 0` across the current lap — marks it an out/in-lap.
+    pitted_this_lap: bool,
+    /// Pit-lane / garage cycle (return-to-garage, pit stop) → new stint.
+    pit_cycle: PitCycleDetector,
     port: u16,
 }
 
@@ -136,6 +140,8 @@ impl F1Adapter {
                 s2_ms: None,
                 s3_ms: None,
             },
+            pitted_this_lap: false,
+            pit_cycle: PitCycleDetector::new(),
             port,
         }
     }
@@ -290,6 +296,10 @@ impl GameAdapter for F1Adapter {
         self.latest_lap.is_some()
     }
 
+    fn detects_pit_stints(&self) -> bool {
+        true
+    }
+
     fn poll(&mut self) -> AdapterEvent {
         if !self.bind() {
             return AdapterEvent::Disconnected;
@@ -306,6 +316,8 @@ impl GameAdapter for F1Adapter {
 
         if !self.session_announced {
             self.session_announced = true;
+            self.pitted_this_lap = false;
+            self.pit_cycle.reset();
             self.last_track_id = track_id.clone();
             self.last_session_type = session_type as i16;
             return AdapterEvent::SessionInfo(Self::session_info(
@@ -328,6 +340,8 @@ impl GameAdapter for F1Adapter {
             self.last_session_type = session_type as i16;
             self.last_lap_num = 0;
             self.completed_lap_invalid = 0;
+            self.pitted_this_lap = false;
+            self.pit_cycle.reset();
             self.sector_times = SectorTimes {
                 s1_ms: None,
                 s2_ms: None,
@@ -367,6 +381,9 @@ impl GameAdapter for F1Adapter {
             };
             self.last_lap_num = lap.current_lap_num;
             self.completed_lap_invalid = lap.current_lap_invalid;
+            // Out / in-laps don't arm the pit-cycle stint split.
+            self.pit_cycle
+                .lap_completed(std::mem::take(&mut self.pitted_this_lap));
             self.latch_sector_times(&lap);
             return AdapterEvent::LapCompleted(summary);
         }
@@ -374,6 +391,7 @@ impl GameAdapter for F1Adapter {
         if self.last_lap_num == 0 {
             self.last_lap_num = lap.current_lap_num.max(1);
             self.completed_lap_invalid = lap.current_lap_invalid;
+            self.pitted_this_lap = lap.pit_status != 0;
             return AdapterEvent::LapStarted {
                 lap_number: self.last_lap_num as u32,
             };
@@ -381,8 +399,17 @@ impl GameAdapter for F1Adapter {
 
         // Still on the same lap — latch invalid flag and sector splits for when it ends.
         self.completed_lap_invalid = lap.current_lap_invalid;
+        self.pitted_this_lap |= lap.pit_status != 0;
         self.latch_sector_times(&lap);
         self.last_lap_num = lap.current_lap_num;
+
+        // Return-to-garage / pit stop after a real lap → new stint.
+        if self
+            .pit_cycle
+            .left_pits(lap.pit_status != 0 || lap.driver_status == 0)
+        {
+            return AdapterEvent::StintBoundary;
+        }
 
         let (pos_x, pos_y, pos_z) = self.latest_motion.unwrap_or((0.0, 0.0, 0.0));
         let (speed, throttle, brake, steer, gear, rpm, tyre_temps) =
