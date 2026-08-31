@@ -400,15 +400,7 @@ impl AccAdapter {
         lap_valid_snapshot: bool,
     ) -> Option<AdapterEvent> {
 
-        // ACC reports `last_time` as 0 or a huge sentinel until a lap has been
-        // scored this run (out-laps, first lap after a return-to-garage). Fall
-        // back to the live lap timer's peak for those.
-        let acc_last = graphics.last_time;
-        let lap_time_ms = if (1_000..=1_800_000).contains(&acc_last) {
-            acc_last as u32
-        } else {
-            self.max_current_time_ms
-        };
+        let lap_time_ms = resolve_lap_time_ms(graphics.last_time, self.max_current_time_ms);
 
         let in_pit = self.current_lap_in_pit;
         let sectors = sim_core::acc_cumulative_splits_to_sectors(
@@ -1006,6 +998,72 @@ impl Drop for AccAdapter {
 
     }
 
+}
+
+/// Pick a lap time for a completed lap.
+///
+/// `acc_last` is ACC's `graphics.last_time` (`iLastTime`) — the previous
+/// *scored* lap. It reads 0 or a huge sentinel until a lap has been scored this
+/// run (garage out-laps), and it goes stale for the first lap or two out of a
+/// pit-lane race start, holding the "session start → first crossing" duration
+/// across several real crossings.
+///
+/// `measured` is our own peak of the live lap timer (`graphics.current_time`)
+/// for the lap just run. Trust `acc_last` only when it is in a sane band *and*
+/// agrees with what we measured (i.e. it really is this lap's scored time);
+/// otherwise fall back to the measured time.
+fn resolve_lap_time_ms(acc_last: i32, measured: u32) -> u32 {
+    let acc_plausible = (1_000..=1_800_000).contains(&acc_last);
+    let acc_agrees =
+        measured < 1_000 || acc_last as u32 <= measured + measured / 4 + 2_000;
+    if acc_plausible && acc_agrees {
+        acc_last as u32
+    } else if measured >= 1_000 {
+        measured
+    } else {
+        acc_last.max(0) as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_lap_time_ms;
+
+    #[test]
+    fn trusts_acc_time_on_a_normal_lap() {
+        // ACC's iLastTime sits a touch above our sampled peak — trust it.
+        assert_eq!(resolve_lap_time_ms(89_385, 89_200), 89_385);
+        assert_eq!(resolve_lap_time_ms(92_657, 90_100), 92_657);
+    }
+
+    #[test]
+    fn falls_back_when_acc_time_is_absent() {
+        // Garage out-lap: iLastTime not scored yet, live timer ran a full lap.
+        assert_eq!(resolve_lap_time_ms(0, 118_400), 118_400);
+        assert_eq!(resolve_lap_time_ms(i32::MAX, 105_000), 105_000);
+        assert_eq!(resolve_lap_time_ms(-1, 96_000), 96_000);
+    }
+
+    #[test]
+    fn rejects_stale_acc_time_after_a_pit_lane_race_start() {
+        // iLastTime stuck at the ~7:22 session-start span while the live timer
+        // shows a clean ~92 s lap — use the measured time.
+        assert_eq!(resolve_lap_time_ms(442_577, 92_640), 92_640);
+    }
+
+    #[test]
+    fn keeps_the_real_pit_out_lap_time() {
+        // The pit-out lap genuinely took ~7:22 wall-clock; iLastTime and the
+        // live-timer peak agree, so it is kept (and marked invalid elsewhere).
+        assert_eq!(resolve_lap_time_ms(442_575, 442_580), 442_575);
+    }
+
+    #[test]
+    fn no_usable_time_returns_sub_second() {
+        // Nothing to go on — caller drops a sub-1 s lap.
+        assert!(resolve_lap_time_ms(0, 0) < 1_000);
+        assert!(resolve_lap_time_ms(400, 200) < 1_000);
+    }
 }
 
 
