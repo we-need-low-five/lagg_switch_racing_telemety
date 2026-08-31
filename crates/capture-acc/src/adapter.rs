@@ -121,6 +121,12 @@ pub struct AccAdapter {
     /// `completed_lap` delta and the S/F wrap from firing twice for one lap.
     boundary_settled: bool,
 
+    /// A `LapStarted` owed to the recorder from the last S/F crossing. ACC has
+    /// no lap-start signal of its own, so the adapter synthesises one at every
+    /// boundary — that's what clears the recorder's truncated-lap taint and
+    /// sample buffer, exactly like AC / LMU / F1.
+    pending_lap_started: Option<u32>,
+
     /// Return-to-garage / pit-stop → new stint, off the `is_in_pit_lane` edge.
     pit_cycle: PitCycleDetector,
 
@@ -185,6 +191,8 @@ impl AccAdapter {
             max_current_time_ms: 0,
 
             boundary_settled: true,
+
+            pending_lap_started: None,
 
             pit_cycle: PitCycleDetector::new(),
 
@@ -281,6 +289,8 @@ impl AccAdapter {
         self.max_current_time_ms = 0;
 
         self.boundary_settled = true;
+
+        self.pending_lap_started = None;
 
         self.pit_cycle.reset();
 
@@ -473,6 +483,8 @@ impl AccAdapter {
         self.max_current_time_ms = 0;
 
         self.boundary_settled = true;
+
+        self.pending_lap_started = None;
 
         self.sector_times = SectorTimes {
 
@@ -786,7 +798,13 @@ impl GameAdapter for AccAdapter {
         if (crossed_sf || acc_scored) && self.boundary_settled {
             self.boundary_settled = false;
             self.last_completed_laps = graphics.completed_lap;
-            if let Some(event) = self.finish_lap(&graphics, lap_valid_before_tick) {
+            let finished = self.finish_lap(&graphics, lap_valid_before_tick);
+            // Every crossing starts a fresh lap. Owe the recorder a `LapStarted`
+            // so it drops the truncated-lap taint and the sample buffer — ACC
+            // has no lap-start signal, so a stint gap opened while idling in the
+            // garage would otherwise poison the first flying lap.
+            self.pending_lap_started = Some(self.lap_counter + 1);
+            if let Some(event) = finished {
                 return event;
             }
         } else if acc_scored {
@@ -795,6 +813,10 @@ impl GameAdapter for AccAdapter {
         }
         if (0.20..0.80).contains(&norm) {
             self.boundary_settled = true;
+        }
+
+        if let Some(lap_number) = self.pending_lap_started.take() {
+            return AdapterEvent::LapStarted { lap_number };
         }
 
 
