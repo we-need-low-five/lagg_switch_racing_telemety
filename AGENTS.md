@@ -78,7 +78,15 @@ Workspace members are listed in root `Cargo.toml`. Do not add crates outside tha
 npm install
 npm run tauri dev          # preferred: Vite :1420 + Rust backend
 npm run tauri:build        # release + MSI/NSIS under src-tauri/target/release/bundle/
+npm run version:show       # the version a build here would carry
 ```
+
+`tauri:build` goes through `scripts/tauri-build.mjs`, which derives the version
+from git — a release tag when the tree is exactly on one, otherwise the next
+patch as `x.y.z-dev.<commits>` — and passes it (plus a numeric
+`bundle.windows.wix.version` for the MSI) to the CLI with `--config`. The
+`version` in `tauri.conf.json` is only the floor for a tagless checkout; do not
+hand-edit it to release. See `installer/README.md`.
 
 Frontend-only (no Rust/tray):
 
@@ -115,6 +123,8 @@ There is **no** ESLint/Prettier/clippy CI config in-repo. Rely on:
 
 | Script | Purpose |
 |--------|---------|
+| `scripts/app-version.mjs` | Derive the build version from git tags + commit distance |
+| `scripts/tauri-build.mjs` | `tauri build` with that version stamped in via `--config` |
 | `scripts/build-tracks.mjs` | Fetch/normalize track centerlines → `public/tracks/` |
 | `scripts/merge-sector-splits.mjs` | One-off sector split merge helper |
 

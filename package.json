@@ -9,7 +9,8 @@
     "build:tracks": "node scripts/build-tracks.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:build": "tauri build"
+    "tauri:build": "node scripts/tauri-build.mjs",
+    "version:show": "node scripts/app-version.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
