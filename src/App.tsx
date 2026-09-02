@@ -8,6 +8,7 @@ import { SessionReview } from "./views/SessionReview";
 import { Sessions } from "./views/Sessions";
 import { Settings } from "./views/Settings";
 import { Sidebar } from "./components/Sidebar";
+import { TitleBar } from "./components/TitleBar";
 import { usePreferences } from "./lib/preferences";
 import { applyTheme } from "./lib/theme";
 import "./App.css";
@@ -21,7 +22,10 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {/* Sidebar precedes TitleBar so the title bar's rail can follow its
+          hover expansion; grid placement keeps the title bar on top. */}
       <Sidebar />
+      <TitleBar />
       <main className="content">
         <Routes>
           <Route path="/" element={<Sessions />} />

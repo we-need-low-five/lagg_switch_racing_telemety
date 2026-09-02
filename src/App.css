@@ -6,6 +6,7 @@
   font-weight: 400;
   color-scheme: dark;
   --compare-chrome-height: 7.5rem;
+  --titlebar-height: 32px;
 
   /* Theme palette (recipe seed #221C26; overridden by applyTheme) */
   --theme-h: 276;
@@ -135,27 +136,123 @@ textarea {
 }
 
 .app-shell {
+  --sidebar-rail-width: 60px;
+  --sidebar-expanded-width: 220px;
   display: grid;
   grid-template-columns: auto 1fr;
+  grid-template-rows: var(--titlebar-height) 1fr;
   height: 100vh;
   overflow: hidden;
 }
 
+/* —— Custom window title bar (window decorations are off) ——
+   Split in two: a rail segment that continues the sidebar column and a main
+   segment that continues the content area. `.titlebar` follows `.sidebar` in
+   the DOM so the rail can track the sidebar's hover expansion. */
+.titlebar {
+  grid-row: 1;
+  grid-column: 1 / -1;
+  display: flex;
+  height: var(--titlebar-height);
+  user-select: none;
+  z-index: 30;
+}
+
+.titlebar-rail {
+  width: var(--sidebar-rail-width);
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-color);
+  transition: width 0.15s ease-out;
+}
+
+.sidebar.icon-rail.show-labels ~ .titlebar .titlebar-rail {
+  width: var(--sidebar-expanded-width);
+}
+
+.titlebar-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 0.85rem;
+  background: var(--bg-base);
+}
+
+.titlebar-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  flex-shrink: 0;
+}
+
+.titlebar-button {
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+
+.titlebar-button svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.titlebar-button:hover {
+  background: var(--bg-control);
+  color: var(--text-on-control);
+}
+
+.titlebar-button:active {
+  background: var(--accent-hover);
+}
+
+.titlebar-button.close:hover {
+  background: color-mix(in srgb, var(--color-negative) 78%, #000);
+  color: #fff;
+}
+
+.titlebar-button.close:active {
+  background: color-mix(in srgb, var(--color-negative) 58%, #000);
+  color: #fff;
+}
+
 /* —— Icon rail sidebar —— */
 .sidebar.icon-rail {
-  --sidebar-rail-width: 60px;
-  --sidebar-expanded-width: 220px;
+  grid-row: 2;
+  grid-column: 1;
   --sidebar-cell-size: 40px;
   --sidebar-highlight-size: 45px;
   --sidebar-tab-gutter: 15px;
   width: var(--sidebar-rail-width);
-  padding: 0.75rem 0;
+  padding: 0.25rem 0 0.75rem;
   background: var(--bg-surface);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  height: 100vh;
+  height: 100%;
   position: sticky;
   top: 0;
   align-self: start;
@@ -328,9 +425,11 @@ textarea {
 }
 
 .content {
+  grid-row: 2;
+  grid-column: 2;
   padding: 1.5rem;
   min-width: 0;
-  height: 100vh;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   overflow-anchor: none;
