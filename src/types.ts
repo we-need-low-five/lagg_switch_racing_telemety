@@ -112,6 +112,8 @@ export interface LeaderboardEntry {
   rank: number;
   place?: number;
   player_name: string;
+  /** Kept on the leaderboard row, so it outlives the source session. */
+  car: string;
   lap_time_ms: number;
   valid: boolean;
   session_id: string;

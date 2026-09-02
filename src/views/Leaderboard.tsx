@@ -5,6 +5,7 @@ import {
   listLeaderboardGames,
   listLeaderboardTracks,
 } from "../api";
+import { formatCarName } from "../lib/formatCarName";
 import type { GameId, LeaderboardEntry, LeaderboardTrackOption } from "../types";
 import { formatLapTime, gameLabel } from "../types";
 
@@ -165,6 +166,7 @@ export function Leaderboard() {
                 <tr>
                   <th>Rank</th>
                   <th>Player</th>
+                  <th>Car</th>
                   <th>Lap time</th>
                   <th>Valid</th>
                 </tr>
@@ -187,6 +189,7 @@ export function Leaderboard() {
                     >
                       <td>{entry.rank}</td>
                       <td>{entry.player_name}</td>
+                      <td>{entry.car ? formatCarName(entry.car) : "—"}</td>
                       <td>{formatLapTime(entry.lap_time_ms)}</td>
                       <td>
                         <span className="tag">

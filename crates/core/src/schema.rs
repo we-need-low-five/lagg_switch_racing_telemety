@@ -307,6 +307,10 @@ pub struct LeaderboardEntry {
     #[serde(default = "default_leaderboard_place")]
     pub place: u32,
     pub player_name: String,
+    /// Car the lap was set in, kept on the leaderboard row so it survives
+    /// deletion of the source session.
+    #[serde(default)]
+    pub car: String,
     pub lap_time_ms: u32,
     pub valid: bool,
     pub session_id: Uuid,

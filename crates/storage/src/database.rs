@@ -1571,7 +1571,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT lb.player_name, lb.lap_time_ms, lb.valid, lb.source_session_id, lb.source_lap_id,
-                   CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END
+                   CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END, lb.car
             FROM leaderboard_laps lb
             LEFT JOIN sessions s ON s.id = lb.source_session_id
             WHERE lb.valid = 1
@@ -1593,6 +1593,7 @@ impl Database {
                 session_id: Uuid::parse_str(&row.get::<_, String>(3)?).unwrap_or_default(),
                 lap_id: Uuid::parse_str(&row.get::<_, String>(4)?).unwrap_or_default(),
                 session_exists: row.get::<_, i32>(5)? != 0,
+                car: row.get(6)?,
             })
         })?;
         let entries: Vec<LeaderboardEntry> = rows.filter_map(Result::ok).collect();
