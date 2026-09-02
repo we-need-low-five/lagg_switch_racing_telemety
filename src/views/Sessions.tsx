@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { OverflowMenu } from "../components/OverflowMenu";
+import { TrackPreview } from "../components/TrackPreview";
 import { formatCarName } from "../lib/formatCarName";
 import { sessionBundleFileName } from "../lib/sessionBundleName";
 import type { RecordingStatus, SessionRecord } from "../types";
@@ -159,29 +160,45 @@ export function Sessions() {
       <div className="session-grid">
         {sessions.map((session) => (
           <article key={session.id} className="session-card">
-            <div className="session-card-top">
+            <div className="session-card-meta">
               <span className="badge">{gameLabel(session.game)}</span>
               <span className="muted">
-                {new Date(session.started_at).toLocaleString()}
+                {new Date(session.started_at).toLocaleString(undefined, {
+                  dateStyle: "short",
+                  timeStyle: "short",
+                })}
               </span>
             </div>
-            <div className="session-card-title">
+            <TrackPreview
+              trackId={session.track_id}
+              trackName={session.track}
+            />
+            <div className="session-card-heading">
               <h3>{session.track || "Unknown track"}</h3>
-              {sessionPhaseLabels(session).map((label) => (
-                <span key={label} className="badge">
-                  {label}
-                </span>
-              ))}
+              <p className="session-card-car">{formatCarName(session.car)}</p>
             </div>
-            <p>{formatCarName(session.car)}</p>
+            {sessionPhaseLabels(session).length > 0 && (
+              <div className="session-card-phases">
+                {sessionPhaseLabels(session).map((label) => (
+                  <span key={label} className="badge">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
             <div className="session-stats">
-              <span>{session.lap_count} laps</span>
-              <span>
-                Best:{" "}
-                {session.best_lap_time_ms
-                  ? formatLapTime(session.best_lap_time_ms)
-                  : "—"}
-              </span>
+              <div className="session-stat">
+                <span className="session-stat-label">Laps</span>
+                <span className="session-stat-value">{session.lap_count}</span>
+              </div>
+              <div className="session-stat">
+                <span className="session-stat-label">Best lap</span>
+                <span className="session-stat-value">
+                  {session.best_lap_time_ms
+                    ? formatLapTime(session.best_lap_time_ms)
+                    : "—"}
+                </span>
+              </div>
             </div>
             <div className="card-actions">
               <button

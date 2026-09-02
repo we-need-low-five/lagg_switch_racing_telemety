@@ -10,6 +10,8 @@ function themeCssVar(name: string, fallback: string): string {
 }
 import {
   buildPathMetrics,
+  makeTrackProjector,
+  outlinePathFrom,
   type PathMetrics,
   type TrackLayout,
 } from "../../lib/trackLayout";
@@ -28,33 +30,8 @@ const WIDTH = 420;
 const HEIGHT = 260;
 const PAD = 20;
 
-/** Map layout coords into the SVG viewBox, preserving aspect ratio. */
-function makeProjector(points: [number, number][]) {
-  const xs = points.map((p) => p[0]);
-  const ys = points.map((p) => p[1]);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const spanX = maxX - minX || 1;
-  const spanY = maxY - minY || 1;
-  const innerW = WIDTH - PAD * 2;
-  const innerH = HEIGHT - PAD * 2;
-  const scale = Math.min(innerW / spanX, innerH / spanY);
-  const offsetX = PAD + (innerW - spanX * scale) / 2;
-  const offsetY = PAD + (innerH - spanY * scale) / 2;
-
-  return (x: number, y: number) => ({
-    x: offsetX + (x - minX) * scale,
-    // Flip Y so track north stays visually up in SVG space.
-    y: offsetY + (maxY - y) * scale,
-  });
-}
-
 function outlinePath(metrics: PathMetrics) {
-  return metrics.points
-    .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
-    .join(" ");
+  return outlinePathFrom(metrics.points);
 }
 
 /** Convert a mouse event into SVG viewBox coordinates (handles letterboxing). */
@@ -87,7 +64,11 @@ export function TrackMap({
     if (!layout || layout.points.length < 2) {
       return { metrics: null, projectSample: null };
     }
-    const project = makeProjector(layout.points);
+    const project = makeTrackProjector(layout.points, {
+      width: WIDTH,
+      height: HEIGHT,
+      pad: PAD,
+    });
     const pathMetrics = buildPathMetrics(layout.points, project);
     return {
       metrics: pathMetrics,

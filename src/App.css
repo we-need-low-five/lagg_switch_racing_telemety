@@ -501,7 +501,7 @@ textarea {
 .session-grid,
 .setup-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 1rem;
 }
 
@@ -513,12 +513,19 @@ textarea {
   padding: 1rem;
 }
 
-.session-card h3,
 .setup-card h2 {
   margin: 0.4rem 0;
 }
 
-.session-card-top,
+/* One vertical rhythm for the whole card instead of per-element margins. */
+.session-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1.1rem;
+}
+
+.session-card-meta,
 .setup-card-header {
   display: flex;
   justify-content: space-between;
@@ -526,17 +533,67 @@ textarea {
   gap: 0.5rem;
 }
 
-.session-card-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  min-width: 0;
-  margin: 0.4rem 0;
+.session-card-meta .muted {
+  font-size: 0.85rem;
 }
 
-.session-card-title h3 {
+.track-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96px;
+  padding: 0.25rem;
+  border-radius: 12px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.track-preview svg {
+  width: 100%;
+  height: 100%;
+}
+
+.track-preview-outline {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.track-preview-start {
+  fill: var(--link-color);
+}
+
+.track-preview-empty {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.session-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.session-card-heading h3 {
   margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.3;
+}
+
+.session-card-car {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.session-card-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
 .badge,
@@ -566,11 +623,43 @@ textarea {
   color: var(--color-warning-text);
 }
 
+/* `margin-top: auto` puts the slack above the divider, so the stats and action
+   rows line up across a grid row even when cards carry different phase badges. */
 .session-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: auto 0 0;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.session-stat {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.session-stat-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--text-muted);
-  margin: 0.8rem 0;
+}
+
+.session-stat-value {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-card .card-actions {
+  padding-top: 0.15rem;
+}
+
+/* Review button takes the row; the overflow trigger keeps its own width. */
+.session-card .card-actions > button {
+  flex: 1;
 }
 
 .empty-state {

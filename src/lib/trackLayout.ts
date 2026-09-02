@@ -73,6 +73,45 @@ export interface PathPoint {
   y: number;
 }
 
+export interface ProjectorBox {
+  width: number;
+  height: number;
+  pad: number;
+}
+
+/** Map layout coords into an SVG viewBox, preserving aspect ratio. */
+export function makeTrackProjector(
+  points: [number, number][],
+  { width, height, pad }: ProjectorBox,
+): (x: number, y: number) => PathPoint {
+  const xs = points.map((p) => p[0]);
+  const ys = points.map((p) => p[1]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+  const innerW = width - pad * 2;
+  const innerH = height - pad * 2;
+  const scale = Math.min(innerW / spanX, innerH / spanY);
+  const offsetX = pad + (innerW - spanX * scale) / 2;
+  const offsetY = pad + (innerH - spanY * scale) / 2;
+
+  return (x: number, y: number) => ({
+    x: offsetX + (x - minX) * scale,
+    // Flip Y so track north stays visually up in SVG space.
+    y: offsetY + (maxY - y) * scale,
+  });
+}
+
+/** Point list → an SVG `d` string. */
+export function outlinePathFrom(points: PathPoint[]): string {
+  return points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
+    .join(" ");
+}
+
 export interface PathMetrics {
   points: PathPoint[];
   cumulative: number[];
