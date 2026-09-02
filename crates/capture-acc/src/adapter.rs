@@ -37,6 +37,11 @@ fn acc_session_kind(session_type: AccSessionType) -> SessionKind {
 /// Sentinel for "no session type observed yet" in the adapter's last-seen state.
 const SESSION_UNSET: i32 = i32::MIN;
 
+/// How long a taken crossing waits for ACC to score it before falling back to
+/// the measured time, in polls (`RECORDER_POLL_INTERVAL` is 3 ms, so ~180 ms).
+/// An out-lap ACC never scores always burns the whole window.
+const SCORING_GRACE_POLLS: u32 = 60;
+
 
 
 const PHYSICS_NAME: &str = "Local\\acpmf_physics";
@@ -127,9 +132,42 @@ pub struct AccAdapter {
     /// sample buffer, exactly like AC / LMU / F1.
     pending_lap_started: Option<u32>,
 
+    /// Crossing taken but not yet stamped with a lap time — see [`PendingLap`].
+    pending_lap: Option<PendingLap>,
+
     /// Return-to-garage / pit-stop → new stint, off the `is_in_pit_lane` edge.
     pit_cycle: PitCycleDetector,
 
+}
+
+/// A start/finish crossing, held for the few polls ACC needs to score the lap.
+///
+/// ACC publishes `iLastTime` a moment *after* the car crosses the line, so on
+/// the wrap tick it still holds the previous lap's time — and around a circuit
+/// where consecutive laps are seconds apart that value sails through
+/// `resolve_lap_time_ms`'s agreement band. Reading it there stamped every lap
+/// with the one before it. Everything the finished lap needs is captured at the
+/// crossing; only the time waits.
+struct PendingLap {
+    valid: bool,
+    in_pit: bool,
+    s1_ms: Option<u32>,
+    s2_ms: Option<u32>,
+    /// Peak of ACC's live lap timer over the lap — the fallback time for a
+    /// crossing ACC never scores (garage out-laps).
+    measured_ms: u32,
+    tyre_compound: Option<String>,
+    tc_level: Option<i32>,
+    abs_level: Option<i32>,
+    /// `iLastTime` / `completedLaps` as they read on the crossing tick. The lap
+    /// is scored once either of them moves.
+    acc_last_time: i32,
+    completed_laps: i32,
+    /// ACC scored the lap on the crossing tick itself (the boundary came from a
+    /// `completedLaps` bump): `iLastTime` already describes it, nothing to wait
+    /// for.
+    scored_at_crossing: bool,
+    polls: u32,
 }
 
 
@@ -193,6 +231,8 @@ impl AccAdapter {
             boundary_settled: true,
 
             pending_lap_started: None,
+
+            pending_lap: None,
 
             pit_cycle: PitCycleDetector::new(),
 
@@ -292,6 +332,8 @@ impl AccAdapter {
 
         self.pending_lap_started = None;
 
+        self.pending_lap = None;
+
         self.pit_cycle.reset();
 
         self.sector_times = SectorTimes {
@@ -384,35 +426,35 @@ impl AccAdapter {
 
 
 
-    /// Emit the lap that just ended at a start/finish boundary. `poll` calls
-    /// this once per crossing, whether the boundary was seen as an ACC
-    /// `completed_lap` increment or as a `normalized_car_position` wrap.
+    /// Take the lap that just ended at a start/finish boundary and park it in
+    /// `pending_lap`. `poll` calls this once per crossing, whether the boundary
+    /// was seen as an ACC `completed_lap` increment or as a
+    /// `normalized_car_position` wrap; [`Self::score_pending_lap`] emits it.
     ///
     /// `lap_valid_snapshot` is `current_lap_valid` as of the previous tick — on
     /// the boundary tick ACC's live `is_valid_lap` already describes the next
     /// lap, so the finished lap is judged on the pre-tick value.
     ///
-    /// Per-lap state is cleared even when no lap is emitted (no usable time,
-    /// e.g. the first wrap straight out of the garage).
-    fn finish_lap(
-        &mut self,
-        graphics: &GraphicsMap,
-        lap_valid_snapshot: bool,
-    ) -> Option<AdapterEvent> {
-
-        let lap_time_ms = resolve_lap_time_ms(graphics.last_time, self.max_current_time_ms);
-
+    /// Per-lap state is cleared here, at the crossing: the next lap's sectors
+    /// and lap timer start now, whatever the finished lap ends up being worth.
+    fn take_lap(&mut self, graphics: &GraphicsMap, lap_valid_snapshot: bool, scored: bool) {
         let in_pit = self.current_lap_in_pit;
-        let sectors = sim_core::acc_cumulative_splits_to_sectors(
-            self.sector_times.s1_ms,
-            self.sector_times.s2_ms,
-            lap_time_ms,
-        );
-        let tyre_compound = self.lap_start_compound.take();
-        let tc_level = self.lap_start_tc.take();
-        let abs_level = self.lap_start_abs.take();
 
-        // Reset per-lap state regardless of whether a lap is emitted.
+        self.pending_lap = Some(PendingLap {
+            valid: lap_valid_snapshot && !in_pit,
+            in_pit,
+            s1_ms: self.sector_times.s1_ms,
+            s2_ms: self.sector_times.s2_ms,
+            measured_ms: self.max_current_time_ms,
+            tyre_compound: self.lap_start_compound.take(),
+            tc_level: self.lap_start_tc.take(),
+            abs_level: self.lap_start_abs.take(),
+            acc_last_time: graphics.last_time,
+            completed_laps: graphics.completed_lap,
+            scored_at_crossing: scored,
+            polls: 0,
+        });
+
         self.lap_start_meta_captured = false;
         self.sector_times = SectorTimes {
             s1_ms: None,
@@ -423,26 +465,58 @@ impl AccAdapter {
         self.current_lap_valid = true;
         self.current_lap_in_pit = false;
         self.max_current_time_ms = 0;
+    }
 
-        if lap_time_ms < 1_000 {
+    /// Emit the held crossing once ACC has scored it — `iLastTime` or
+    /// `completedLaps` moved — or once the grace window runs out and the
+    /// measured time has to do.
+    ///
+    /// `None` means "still waiting", or that the scored lap had no usable time
+    /// (the first wrap straight out of the garage) and was dropped. Either way
+    /// the crossing still owes the recorder a `LapStarted`.
+    fn score_pending_lap(&mut self, acc_last_time: i32, completed_laps: i32) -> Option<AdapterEvent> {
+        let pending = self.pending_lap.as_mut()?;
+        pending.polls += 1;
+        let scored = pending.scored_at_crossing
+            || acc_last_time != pending.acc_last_time
+            || completed_laps > pending.completed_laps;
+        if !scored && pending.polls < SCORING_GRACE_POLLS {
             return None;
         }
 
-        self.lap_counter += 1;
-        // Out / in-laps are recorded (tagged invalid) but don't arm the
-        // return-to-garage stint split.
-        self.pit_cycle.lap_completed(in_pit);
+        let pending = self.pending_lap.take()?;
+        // An unscored crossing leaves ACC's `iLastTime` describing the *previous*
+        // lap — pass 0 so only the measured time is in play.
+        let acc_last = if scored { acc_last_time } else { 0 };
+        let lap_time_ms = resolve_lap_time_ms(acc_last, pending.measured_ms);
 
-        Some(AdapterEvent::LapCompleted(LapSummary {
-            lap_number: self.lap_counter,
-            lap_time_ms,
-            valid: lap_valid_snapshot && !in_pit,
-            sectors,
-            tyre_compound,
-            tc_level,
-            abs_level,
-            fuel_used_l: None,
-        }))
+        let lap = (lap_time_ms >= 1_000).then(|| {
+            self.lap_counter += 1;
+            // Out / in-laps are recorded (tagged invalid) but don't arm the
+            // return-to-garage stint split.
+            self.pit_cycle.lap_completed(pending.in_pit);
+            AdapterEvent::LapCompleted(LapSummary {
+                lap_number: self.lap_counter,
+                lap_time_ms,
+                valid: pending.valid,
+                sectors: sim_core::acc_cumulative_splits_to_sectors(
+                    pending.s1_ms,
+                    pending.s2_ms,
+                    lap_time_ms,
+                ),
+                tyre_compound: pending.tyre_compound,
+                tc_level: pending.tc_level,
+                abs_level: pending.abs_level,
+                fuel_used_l: None,
+            })
+        });
+
+        // Every crossing starts a fresh lap. Owe the recorder a `LapStarted` so
+        // it drops the truncated-lap taint and the sample buffer — ACC has no
+        // lap-start signal, so a stint gap opened while idling in the garage
+        // would otherwise poison the first flying lap.
+        self.pending_lap_started = Some(self.lap_counter + 1);
+        lap
     }
 
 
@@ -477,6 +551,8 @@ impl AccAdapter {
         self.boundary_settled = true;
 
         self.pending_lap_started = None;
+
+        self.pending_lap = None;
 
         self.sector_times = SectorTimes {
 
@@ -786,25 +862,39 @@ impl GameAdapter for AccAdapter {
 
         let acc_scored = self.last_completed_laps >= 0
             && graphics.completed_lap > self.last_completed_laps;
+        if (0.20..0.80).contains(&norm) {
+            self.boundary_settled = true;
+        }
+
+        // A crossing already taken is waiting for ACC to put a time on it. Hold
+        // telemetry until it lands: the samples from here on belong to the lap
+        // that just started, and the recorder still has the finished lap's
+        // buffer open.
+        if self.pending_lap.is_some() {
+            if acc_scored {
+                self.last_completed_laps = graphics.completed_lap;
+            }
+            return self
+                .score_pending_lap(graphics.last_time, graphics.completed_lap)
+                .unwrap_or(AdapterEvent::Heartbeat);
+        }
 
         if (crossed_sf || acc_scored) && self.boundary_settled {
             self.boundary_settled = false;
             self.last_completed_laps = graphics.completed_lap;
-            let finished = self.finish_lap(&graphics, lap_valid_before_tick);
-            // Every crossing starts a fresh lap. Owe the recorder a `LapStarted`
-            // so it drops the truncated-lap taint and the sample buffer — ACC
-            // has no lap-start signal, so a stint gap opened while idling in the
-            // garage would otherwise poison the first flying lap.
-            self.pending_lap_started = Some(self.lap_counter + 1);
-            if let Some(event) = finished {
-                return event;
+            self.take_lap(&graphics, lap_valid_before_tick, acc_scored);
+            if acc_scored {
+                // ACC scored the crossing itself — emit on the spot.
+                if let Some(event) =
+                    self.score_pending_lap(graphics.last_time, graphics.completed_lap)
+                {
+                    return event;
+                }
             }
+            return AdapterEvent::Heartbeat;
         } else if acc_scored {
             // Boundary already taken for this crossing; keep the tracker in step.
             self.last_completed_laps = graphics.completed_lap;
-        }
-        if (0.20..0.80).contains(&norm) {
-            self.boundary_settled = true;
         }
 
         if let Some(lap_number) = self.pending_lap_started.take() {
@@ -1021,13 +1111,17 @@ fn resolve_lap_time_ms(acc_last: i32, measured: u32) -> u32 {
     } else if measured >= 1_000 {
         measured
     } else {
-        acc_last.max(0) as u32
+        // Neither source is usable: ACC's 0 / `i32::MAX` sentinel with no live
+        // timer behind it (a race start taken from the pit lane). 0 drops the
+        // lap instead of storing the sentinel as a lap time.
+        0
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_lap_time_ms;
+    use super::{resolve_lap_time_ms, AccAdapter, PendingLap, SCORING_GRACE_POLLS};
+    use sim_core::AdapterEvent;
 
     #[test]
     fn trusts_acc_time_on_a_normal_lap() {
@@ -1063,6 +1157,101 @@ mod tests {
         // Nothing to go on — caller drops a sub-1 s lap.
         assert!(resolve_lap_time_ms(0, 0) < 1_000);
         assert!(resolve_lap_time_ms(400, 200) < 1_000);
+    }
+
+    #[test]
+    fn never_returns_an_implausible_sentinel() {
+        // Race start from the pit lane: iLastTime is ACC's `i32::MAX` sentinel
+        // and the live timer never ran. Storing the sentinel as a lap time is
+        // worse than dropping the lap.
+        assert!(resolve_lap_time_ms(i32::MAX, 0) < 1_000);
+        assert!(resolve_lap_time_ms(i32::MAX, 999) < 1_000);
+    }
+
+    fn pending(measured_ms: u32, acc_last_time: i32) -> PendingLap {
+        PendingLap {
+            valid: true,
+            in_pit: false,
+            s1_ms: Some(23_000),
+            s2_ms: Some(39_000),
+            measured_ms,
+            tyre_compound: None,
+            tc_level: None,
+            abs_level: None,
+            acc_last_time,
+            completed_laps: 4,
+            scored_at_crossing: false,
+            polls: 0,
+        }
+    }
+
+    fn lap_time_of(event: &AdapterEvent) -> u32 {
+        match event {
+            AdapterEvent::LapCompleted(summary) => summary.lap_time_ms,
+            other => panic!("expected a completed lap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_held_crossing_waits_for_acc_to_score_it() {
+        let mut adapter = AccAdapter::new();
+        adapter.pending_lap = Some(pending(89_591, 92_627));
+
+        // ACC has not published yet: `iLastTime` still reads the previous lap.
+        assert!(adapter.score_pending_lap(92_627, 4).is_none());
+        assert!(adapter.pending_lap.is_some(), "still held");
+
+        let event = adapter
+            .score_pending_lap(89_607, 5)
+            .expect("scored lap is emitted");
+        assert_eq!(lap_time_of(&event), 89_607, "ACC's own time wins once scored");
+        assert!(adapter.pending_lap.is_none());
+    }
+
+    #[test]
+    fn a_held_crossing_never_takes_the_previous_laps_time() {
+        // Red Bull Ring: a 1:29.591 lap crossed the line while iLastTime still
+        // held the 1:32.627 before it — near enough to sail through the
+        // agreement band, which stamped every lap with the one before it.
+        let mut adapter = AccAdapter::new();
+        adapter.pending_lap = Some(pending(89_591, 92_627));
+
+        let mut event = None;
+        for _ in 0..SCORING_GRACE_POLLS {
+            event = adapter.score_pending_lap(92_627, 4);
+            if event.is_some() {
+                break;
+            }
+        }
+        let event = event.expect("the grace window falls back to the measured time");
+        assert_eq!(lap_time_of(&event), 89_591, "the lap's own measured time");
+    }
+
+    #[test]
+    fn a_crossing_acc_already_scored_emits_without_waiting() {
+        let mut adapter = AccAdapter::new();
+        let mut lap = pending(89_591, 89_607);
+        lap.scored_at_crossing = true;
+        adapter.pending_lap = Some(lap);
+
+        let event = adapter
+            .score_pending_lap(89_607, 4)
+            .expect("no reason to wait");
+        assert_eq!(lap_time_of(&event), 89_607);
+    }
+
+    #[test]
+    fn a_dropped_crossing_still_owes_a_lap_started() {
+        // First wrap out of the garage: no usable time, so no lap — but the next
+        // lap still has to start.
+        let mut adapter = AccAdapter::new();
+        let mut lap = pending(0, 0);
+        lap.scored_at_crossing = true;
+        adapter.pending_lap = Some(lap);
+
+        assert!(adapter.score_pending_lap(0, 4).is_none(), "lap dropped");
+        assert_eq!(adapter.lap_counter, 0, "a dropped lap takes no number");
+        assert_eq!(adapter.pending_lap_started, Some(1));
     }
 }
 
