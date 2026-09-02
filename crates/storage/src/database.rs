@@ -10,6 +10,37 @@ use uuid::Uuid;
 
 const LEADERBOARD_SLOTS_PER_DRIVER: usize = 3;
 
+/// How far a lap's stored time may sit from its own trace and still be that
+/// lap's time. The trace peak is the live lap timer's last reading before the
+/// line, so it trails the scored time by a graphics update or two.
+const TRACE_MATCH_TOLERANCE_MS: i64 = 60;
+
+/// Split an already-grouped, ordered list into consecutive runs sharing a key.
+fn group_by_session<T, K: PartialEq>(rows: Vec<T>, key: impl Fn(&T) -> K) -> Vec<Vec<T>> {
+    let mut groups: Vec<Vec<T>> = Vec::new();
+    let mut current_key: Option<K> = None;
+    for row in rows {
+        let row_key = key(&row);
+        if current_key.as_ref() != Some(&row_key) {
+            current_key = Some(row_key);
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("pushed above").push(row);
+    }
+    groups
+}
+
+/// Where a phase sits in a race weekend. `None` for session types that don't
+/// belong to one (hotlap, time attack, …) and so can't be ordered.
+fn weekend_phase_rank(kind: SessionKind) -> Option<u8> {
+    match kind {
+        SessionKind::Practice => Some(0),
+        SessionKind::Qualifying => Some(1),
+        SessionKind::Race => Some(2),
+        _ => None,
+    }
+}
+
 pub struct Database {
     conn: Connection,
     data_dir: PathBuf,
@@ -84,6 +115,7 @@ impl Database {
         self.backfill_session_fuel_stats()?;
         self.prune_lapless_sessions()?;
         self.merge_split_weekend_sessions()?;
+        self.repair_misrecorded_weekends()?;
         Ok(())
     }
 
@@ -1096,6 +1128,306 @@ impl Database {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [],
         )?;
+        Ok(())
+    }
+
+    /// One-time repair for weekends an earlier build mis-recorded (fixed in the
+    /// ACC adapter's `score_pending_lap` and the recorder's phase handling):
+    ///
+    /// 1. Lap times stamped from ACC's `iLastTime` on the crossing tick, before
+    ///    ACC had published it — every such lap carries the *previous* lap's
+    ///    time, and the last lap of a run carries nothing of its own. The
+    ///    distance-resampled trace holds the lap's real duration, so the laps
+    ///    that contradict their own telemetry can be put back.
+    /// 2. A weekend left on one stint because a stale session kind swallowed the
+    ///    phase change: the game's lap numbers restart inside the stint.
+    ///
+    /// Both are evidence-driven — a lap is only touched when its own trace says
+    /// the stored time belongs to the lap before it, and a session is only split
+    /// where its lap numbers actually restart mid-stint.
+    fn repair_misrecorded_weekends(&self) -> Result<()> {
+        let done: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'lap_time_repair_done'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if done.is_some() {
+            return Ok(());
+        }
+
+        match self.repair_shifted_lap_times() {
+            Ok(repaired) if !repaired.is_empty() => {
+                tracing::info!(laps = repaired.len(), "repaired shifted lap times");
+                if let Err(err) = self.rebuild_leaderboard_for(&repaired) {
+                    tracing::warn!(error = %err, "leaderboard rebuild after lap repair failed");
+                }
+            }
+            Ok(_) => {}
+            Err(err) => tracing::warn!(error = %err, "lap time repair failed"),
+        }
+        if let Err(err) = self.split_unrolled_phase_stints() {
+            tracing::warn!(error = %err, "phase stint repair failed");
+        }
+
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES ('lap_time_repair_done', 'v1')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Put back the lap times an unscored crossing took from the lap before it.
+    /// Returns the repaired laps.
+    ///
+    /// The shift propagates — once ACC's publish lags the crossing, every lap of
+    /// the run carries the one before it — so only a **run** of at least two
+    /// consecutive shifted laps counts. A lone lap whose stored time happens to
+    /// land within a trace's tolerance of its predecessor (invalid laps, where
+    /// the trace spans an off or a reset, do this) is left alone.
+    fn repair_shifted_lap_times(&self) -> Result<Vec<Uuid>> {
+        struct Row {
+            id: String,
+            session_id: String,
+            stored_ms: i64,
+            sectors: SectorTimes,
+            rel_path: String,
+        }
+
+        // ACC only: this is the ACC adapter's boundary that read `iLastTime` a
+        // beat early. Other adapters resolve their lap times differently.
+        let game = serde_json::to_string(&GameId::Acc)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.session_id, l.lap_time_ms, l.sectors_json, f.parquet_path
+             FROM laps l
+             JOIN lap_files f ON f.lap_id = l.id
+             JOIN sessions s ON s.id = l.session_id
+             WHERE s.game = ?1
+             ORDER BY l.session_id ASC, l.rowid ASC",
+        )?;
+        let rows: Vec<Row> = stmt
+            .query_map(params![game], |row| {
+                let sectors_json: String = row.get(3)?;
+                Ok(Row {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    stored_ms: row.get(2)?,
+                    sectors: serde_json::from_str(&sectors_json).unwrap_or(SectorTimes {
+                        s1_ms: None,
+                        s2_ms: None,
+                        s3_ms: None,
+                    }),
+                    rel_path: row.get(4)?,
+                })
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        let mut repaired = Vec::new();
+        let mut touched_sessions: Vec<String> = Vec::new();
+
+        for session in group_by_session(rows, |row| row.session_id.clone()) {
+            let traces: Vec<Option<u32>> = session
+                .iter()
+                .map(|row| self.lap_trace_duration_ms(&row.rel_path).filter(|ms| *ms >= 1_000))
+                .collect();
+
+            // A lap is "shifted" when its stored time is its predecessor's trace
+            // and not its own.
+            let shifted: Vec<bool> = session
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let (Some(own), Some(previous)) = (
+                        traces[index],
+                        index.checked_sub(1).and_then(|before| traces[before]),
+                    ) else {
+                        return false;
+                    };
+                    (row.stored_ms - own as i64).abs() > TRACE_MATCH_TOLERANCE_MS
+                        && (row.stored_ms - previous as i64).abs() <= TRACE_MATCH_TOLERANCE_MS
+                })
+                .collect();
+
+            for (index, row) in session.iter().enumerate() {
+                let Some(trace_ms) = traces[index] else {
+                    continue;
+                };
+                // An implausible time is ACC's `i32::MAX` sentinel — never right,
+                // whatever the neighbours look like.
+                let sentinel = !(1_000..=1_800_000).contains(&row.stored_ms);
+                let in_a_shifted_run = shifted[index]
+                    && (shifted.get(index + 1).copied().unwrap_or(false)
+                        || index.checked_sub(1).is_some_and(|before| shifted[before]));
+                if !sentinel && !in_a_shifted_run {
+                    continue;
+                }
+
+                let sectors = sim_core::acc_cumulative_splits_to_sectors(
+                    row.sectors.s1_ms,
+                    // Stored sectors are per-sector; the helper wants cumulative.
+                    match (row.sectors.s1_ms, row.sectors.s2_ms) {
+                        (Some(s1), Some(s2)) => Some(s1 + s2),
+                        _ => None,
+                    },
+                    trace_ms,
+                );
+                self.conn.execute(
+                    "UPDATE laps SET lap_time_ms = ?1, sectors_json = ?2 WHERE id = ?3",
+                    params![trace_ms, serde_json::to_string(&sectors)?, row.id],
+                )?;
+                if let Ok(id) = Uuid::parse_str(&row.id) {
+                    repaired.push(id);
+                }
+                if !touched_sessions.contains(&row.session_id) {
+                    touched_sessions.push(row.session_id.clone());
+                }
+            }
+        }
+
+        for session in touched_sessions {
+            if let Ok(id) = Uuid::parse_str(&session) {
+                self.refresh_best_lap(id)?;
+            }
+        }
+        Ok(repaired)
+    }
+
+    /// The lap's real duration: the peak of the live lap timer along its
+    /// distance-resampled trace. `None` when the trace is missing or unreadable.
+    fn lap_trace_duration_ms(&self, rel_path: &str) -> Option<u32> {
+        let abs = crate::paths::resolve_data_relative(&self.data_dir, rel_path).ok()?;
+        let samples = crate::parquet_io::read_lap_samples(&abs).ok()?;
+        let peak = samples
+            .iter()
+            .map(|s| s.lap_time_s)
+            .fold(0.0f32, f32::max);
+        (peak > 0.0).then(|| (peak * 1000.0).round() as u32)
+    }
+
+    /// Re-rank the leaderboard around laps whose time changed: drop their rows
+    /// (and any parquet copy those rows owned), then let the normal backfill
+    /// re-fill the slots from the corrected times.
+    fn rebuild_leaderboard_for(&self, lap_ids: &[Uuid]) -> Result<()> {
+        let mut dropped = 0usize;
+        for lap_id in lap_ids {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT parquet_path FROM leaderboard_laps WHERE source_lap_id = ?1")?;
+            let path: Option<String> = stmt
+                .query_map(params![lap_id.to_string()], |row| row.get(0))?
+                .filter_map(Result::ok)
+                .next();
+            drop(stmt);
+            let Some(path) = path else {
+                continue;
+            };
+            self.conn.execute(
+                "DELETE FROM leaderboard_laps WHERE source_lap_id = ?1",
+                params![lap_id.to_string()],
+            )?;
+            if is_leaderboard_parquet(&path) {
+                self.remove_data_file(&path);
+            }
+            dropped += 1;
+        }
+        if dropped > 0 {
+            self.backfill_leaderboard(true)?;
+        }
+        Ok(())
+    }
+
+    /// Split a session whose lap numbers restart *inside* a stint — the phase
+    /// change that should have rolled the stint was swallowed. Laps from the
+    /// restart on move to the next stint; where the session's entry kind is a
+    /// later weekend phase than the laps before the restart, it labels the new
+    /// stint (and the row falls back to the phase the session really opened in).
+    fn split_unrolled_phase_stints(&self) -> Result<()> {
+        struct Lap {
+            id: String,
+            number: i64,
+            stint: i64,
+            kind: Option<String>,
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, session_kind FROM sessions ORDER BY started_at ASC")?;
+        let sessions: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        for (session_id, entry_kind) in sessions {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, lap_number, stint, stint_kind FROM laps
+                 WHERE session_id = ?1 ORDER BY rowid ASC",
+            )?;
+            let laps: Vec<Lap> = stmt
+                .query_map(params![&session_id], |row| {
+                    Ok(Lap {
+                        id: row.get(0)?,
+                        number: row.get(1)?,
+                        stint: row.get(2)?,
+                        kind: row.get(3)?,
+                    })
+                })?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+
+            let mut bumps = 0i64;
+            let mut first_split_at: Option<usize> = None;
+            for index in 1..laps.len() {
+                let restarted = laps[index].number <= laps[index - 1].number;
+                if restarted && laps[index].stint == laps[index - 1].stint {
+                    bumps += 1;
+                    first_split_at.get_or_insert(index);
+                }
+                if bumps > 0 {
+                    self.conn.execute(
+                        "UPDATE laps SET stint = ?1 WHERE id = ?2",
+                        params![laps[index].stint + bumps, laps[index].id],
+                    )?;
+                }
+            }
+
+            let Some(split_at) = first_split_at else {
+                continue;
+            };
+            // The phase before the split is what the session actually opened in;
+            // the entry kind is the phase it was mis-labelled with, and it only
+            // fits the run after the split if it comes later in the weekend.
+            let opened_in = laps[split_at - 1]
+                .kind
+                .as_deref()
+                .map(SessionKind::from_token);
+            let entry = SessionKind::from_token(&entry_kind);
+            let (Some(opened_in), Some(before), Some(after)) = (
+                opened_in,
+                opened_in.and_then(weekend_phase_rank),
+                weekend_phase_rank(entry),
+            ) else {
+                continue;
+            };
+            if after <= before {
+                continue;
+            }
+            let new_stint = laps[split_at].stint + 1;
+            self.conn.execute(
+                "UPDATE laps SET stint_kind = ?1 WHERE session_id = ?2 AND stint = ?3",
+                params![entry.as_str(), &session_id, new_stint],
+            )?;
+            self.conn.execute(
+                "UPDATE sessions SET session_kind = ?1 WHERE id = ?2",
+                params![opened_in.as_str(), &session_id],
+            )?;
+        }
         Ok(())
     }
 
@@ -2175,6 +2507,320 @@ mod tests {
         // Guard was set on open, so the sweep is inert now.
         db.merge_split_weekend_sessions().unwrap();
         assert_eq!(db.list_sessions().unwrap().len(), 2, "guard blocks re-merge");
+    }
+
+    /// A lap trace whose live lap timer ramps to `duration_ms` — what the repair
+    /// reads back as the lap's real duration.
+    fn traced_parquet(
+        data_dir: &Path,
+        session_id: Uuid,
+        lap_id: Uuid,
+        duration_ms: u32,
+    ) -> String {
+        let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
+        let abs = data_dir.join(&rel);
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let samples: Vec<sim_core::DistanceSample> = (0..100)
+            .map(|i| {
+                let fraction = i as f32 / 99.0;
+                serde_json::from_value(serde_json::json!({
+                    "distance_pct": fraction,
+                    "lap_time_s": duration_ms as f32 / 1000.0 * fraction,
+                    "speed_mps": 60.0,
+                    "throttle": 1.0,
+                    "brake": 0.0,
+                    "steering": 0.0,
+                    "gear": 4.0,
+                    "rpm": 7000.0,
+                    "pos_x": 0.0,
+                    "pos_y": 0.0,
+                    "pos_z": 0.0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        crate::write_lap_parquet(&abs, &samples).unwrap();
+        rel
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_traced_lap(
+        db: &Database,
+        data_dir: &Path,
+        session_id: Uuid,
+        lap_number: u32,
+        stored_ms: u32,
+        trace_ms: u32,
+        stint: u32,
+        kind: SessionKind,
+    ) -> Uuid {
+        let lap_id = Uuid::new_v4();
+        let rel = traced_parquet(data_dir, session_id, lap_id, trace_ms);
+        let mut summary = summary(stored_ms, true);
+        summary.lap_number = lap_number;
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", stint, None, kind)
+            .unwrap();
+        lap_id
+    }
+
+    fn clear_repair_guard(db: &Database) {
+        db.conn
+            .execute("DELETE FROM app_meta WHERE key = 'lap_time_repair_done'", [])
+            .unwrap();
+    }
+
+    fn red_bull_ring(db: &Database, kind: SessionKind) -> Uuid {
+        db.create_session_with_kind(
+            GameId::Acc,
+            "red_bull_ring",
+            "Red Bull Ring",
+            "ford_mustang_gt3",
+            "1.0",
+            "Dmytro",
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn repairs_laps_stamped_with_the_previous_laps_time() {
+        let (dir, db) = open_temp();
+        let session = red_bull_ring(&db, SessionKind::Qualifying);
+        // (real duration, what the old adapter stored): the out-lap and the lap
+        // after it are right, everything from there carries the lap before it.
+        let run = [
+            (122_356, 122_356),
+            (92_609, 92_622),
+            (89_591, 92_627),
+            (90_159, 89_607),
+            (89_558, 90_177),
+        ];
+        for (index, (trace, stored)) in run.iter().enumerate() {
+            insert_traced_lap(
+                &db,
+                dir.path(),
+                session,
+                index as u32 + 1,
+                *stored,
+                *trace,
+                1,
+                SessionKind::Qualifying,
+            );
+        }
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.lap_time_ms).collect::<Vec<_>>(),
+            vec![122_356, 92_622, 89_591, 90_159, 89_558],
+            "shifted laps take their own trace; correctly scored laps keep ACC's time"
+        );
+        let sectors = &laps[2].sectors;
+        assert_eq!(
+            sectors.s1_ms.unwrap() + sectors.s2_ms.unwrap() + sectors.s3_ms.unwrap(),
+            89_591,
+            "sectors add back up to the repaired time"
+        );
+        assert!(laps[4].is_best, "the best lap is re-picked from real times");
+
+        let board = db
+            .get_leaderboard(GameId::Acc, "red_bull_ring", "Red Bull Ring")
+            .unwrap();
+        assert_eq!(
+            board.iter().map(|e| e.lap_time_ms).collect::<Vec<_>>(),
+            vec![89_558, 89_591, 90_159],
+            "personal bests are re-ranked on the corrected times"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn leaves_a_lone_lap_that_merely_matches_its_predecessor() {
+        // Watkins Glen: an invalid lap whose trace spans an off (161.9 s) while
+        // ACC scored it at 105.627 — 37 ms from the lap before it by coincidence.
+        // Every other lap matches its own trace, so nothing here is shifted.
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session_with_kind(
+                GameId::Acc, "watkins_glen", "Watkins Glen", "ford_mustang_gt3",
+                "1.0", "Dmytro", SessionKind::Practice,
+            )
+            .unwrap();
+        let run = [
+            (106_503, 106_525),
+            (105_664, 105_682),
+            (161_873, 105_627),
+            (105_120, 105_127),
+        ];
+        for (index, (trace, stored)) in run.iter().enumerate() {
+            insert_traced_lap(
+                &db, dir.path(), session, index as u32 + 1, *stored, *trace,
+                1, SessionKind::Practice,
+            );
+        }
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.lap_time_ms).collect::<Vec<_>>(),
+            vec![106_525, 105_682, 105_627, 105_127],
+            "a single lap matching its predecessor is not a shifted run"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn repairs_a_lap_stored_as_accs_sentinel() {
+        let (dir, db) = open_temp();
+        let session = red_bull_ring(&db, SessionKind::Race);
+        insert_traced_lap(
+            &db,
+            dir.path(),
+            session,
+            1,
+            i32::MAX as u32,
+            136_887,
+            1,
+            SessionKind::Race,
+        );
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(laps[0].lap_time_ms, 136_887);
+        drop(dir);
+    }
+
+    #[test]
+    fn leaves_a_healthy_session_alone() {
+        let (dir, db) = open_temp();
+        let session = red_bull_ring(&db, SessionKind::Qualifying);
+        // Each lap's stored time is its own, a graphics update ahead of the trace.
+        for (index, trace) in [92_609u32, 90_159, 89_558].iter().enumerate() {
+            insert_traced_lap(
+                &db,
+                dir.path(),
+                session,
+                index as u32 + 1,
+                trace + 18,
+                *trace,
+                1,
+                SessionKind::Qualifying,
+            );
+        }
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.lap_time_ms).collect::<Vec<_>>(),
+            vec![92_627, 90_177, 89_576],
+            "times within a graphics update of their own trace are left as scored"
+        );
+        assert!(laps.iter().all(|l| l.stint == 1), "no phantom stint split");
+        drop(dir);
+    }
+
+    #[test]
+    fn splits_a_weekend_whose_lap_numbers_restart_mid_stint() {
+        let (dir, db) = open_temp();
+        // Entry kind is the load-time misread the stale-kind bug left behind.
+        let session = red_bull_ring(&db, SessionKind::Race);
+        for number in 1..=3u32 {
+            insert_traced_lap(
+                &db, dir.path(), session, number, 90_000 + number, 90_000 + number,
+                1, SessionKind::Qualifying,
+            );
+        }
+        for number in 1..=4u32 {
+            insert_traced_lap(
+                &db, dir.path(), session, number, 91_000 + number, 91_000 + number,
+                1, SessionKind::Qualifying,
+            );
+        }
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| (l.stint, l.stint_kind)).collect::<Vec<_>>(),
+            vec![
+                (1, Some(SessionKind::Qualifying)),
+                (1, Some(SessionKind::Qualifying)),
+                (1, Some(SessionKind::Qualifying)),
+                (2, Some(SessionKind::Race)),
+                (2, Some(SessionKind::Race)),
+                (2, Some(SessionKind::Race)),
+                (2, Some(SessionKind::Race)),
+            ],
+            "the restart opens a race stint"
+        );
+        let session_row = db.get_session(session).unwrap().unwrap();
+        assert_eq!(
+            session_row.session_kind,
+            SessionKind::Qualifying,
+            "the row falls back to the phase the session opened in"
+        );
+        assert_eq!(
+            session_row.session_kinds,
+            vec![SessionKind::Qualifying, SessionKind::Race],
+            "both phases show as badges"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn leaves_a_restart_that_already_has_its_own_stint() {
+        let (dir, db) = open_temp();
+        let session = red_bull_ring(&db, SessionKind::Race);
+        for number in 1..=2u32 {
+            insert_traced_lap(
+                &db, dir.path(), session, number, 90_000 + number, 90_000 + number,
+                1, SessionKind::Qualifying,
+            );
+        }
+        // Lap numbers restart, but the recorder already rolled the stint.
+        for number in 1..=2u32 {
+            insert_traced_lap(
+                &db, dir.path(), session, number, 91_000 + number, 91_000 + number,
+                2, SessionKind::Race,
+            );
+        }
+        clear_repair_guard(&db);
+
+        db.repair_misrecorded_weekends().unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.stint).collect::<Vec<_>>(),
+            vec![1, 1, 2, 2],
+            "an already-split weekend is not split again"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn repair_runs_only_once() {
+        let (dir, db) = open_temp();
+        let session = red_bull_ring(&db, SessionKind::Qualifying);
+        insert_traced_lap(&db, dir.path(), session, 1, 92_609, 92_609, 1, SessionKind::Qualifying);
+        insert_traced_lap(&db, dir.path(), session, 2, 92_627, 89_591, 1, SessionKind::Qualifying);
+
+        // The guard was written when the database opened, so the sweep is inert.
+        db.repair_misrecorded_weekends().unwrap();
+        assert_eq!(
+            db.list_laps(session).unwrap()[1].lap_time_ms,
+            92_627,
+            "guard blocks a second pass"
+        );
+        drop(dir);
     }
 
     #[test]
