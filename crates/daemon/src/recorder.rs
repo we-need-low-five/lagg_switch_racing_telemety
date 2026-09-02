@@ -206,7 +206,31 @@ impl RecordingService {
             .as_ref()
             .is_some_and(|current| session_kind_changed(current, &info));
         if phase_changed {
-            return Ok(self.begin_phase_stint(info.session_kind));
+            let kind = info.session_kind;
+            // Remember the phase we just moved into. Comparing the *next*
+            // announce against a stale kind swallows it — Q → R read against a
+            // still-stored R looks like no change at all, and the race then
+            // shares the qualifying stint (with the game's lap numbers
+            // restarting inside it).
+            let no_laps_yet = self.current_stint == 1 && !self.laps_in_current_stint;
+            self.session_info = Some(info);
+            if no_laps_yet {
+                // Nothing recorded under the entry kind — it was a load-time
+                // reading, not a phase the session ever ran. Re-label the row.
+                if let Some(session_id) = self.session_id {
+                    let session = self.session_info.as_ref().expect("just stored");
+                    self.db.lock().update_session_metadata(
+                        session_id,
+                        &session.track_id,
+                        &session.track,
+                        &session.car,
+                        &session.game_version,
+                        &session.player_name,
+                        kind,
+                    )?;
+                }
+            }
+            return Ok(self.begin_phase_stint(kind));
         }
 
         if let Some(session_id) = self.session_id {
@@ -358,14 +382,17 @@ impl RecordingService {
 
     /// Handle a weekend phase change (Practice → Qualifying → Race) on the same
     /// track and car: stay in the one recording, but start a fresh stint tagged
-    /// with the new phase. If the phase load froze physics long enough for the
-    /// heartbeat gap to already open a stint, that stint (and its measured
-    /// break) is kept and only re-labelled.
+    /// with the new phase.
+    ///
+    /// The bump runs whether or not a freeze gap is open. Loading the next phase
+    /// always freezes physics well past `LIVE_PHYSICS_TIMEOUT`, and for a
+    /// pit-aware adapter that gap no longer advances the stint by itself — so
+    /// skipping the bump here left the whole weekend on one stint. When the gap
+    /// *did* advance it (non-pit-aware games), `advance_stint` is a no-op on the
+    /// fresh stint and its measured break survives.
     fn begin_phase_stint(&mut self, kind: SessionKind) -> Option<String> {
-        if !self.stint_gap_open {
-            self.advance_stint(false);
-            self.discard_in_progress_lap();
-        }
+        self.advance_stint(false);
+        self.discard_in_progress_lap();
         self.current_stint_kind = kind;
         Some(format!(
             "{} — recording continues (stint {})",
@@ -772,6 +799,99 @@ mod tests {
                 Some(SessionKind::Race),
             ],
             "each stint carries its phase label"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn phase_change_after_the_load_freeze_still_splits_the_stint() {
+        // Loading the next phase always freezes physics past the timeout, and
+        // for a pit-aware game that freeze deliberately does not split. The
+        // phase change itself must still roll the stint.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Qualifying,
+        ))];
+        events.extend(telemetry(6));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service_pit_aware(events);
+        run(&mut svc);
+
+        svc.expire_heartbeat();
+        let _ = svc.tick().unwrap();
+        assert!(svc.stint_gap_open, "the phase load froze physics");
+
+        let mut race = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Race,
+        ))];
+        race.extend(telemetry(6));
+        race.push(lap_completed(1, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new_pit_aware(race)));
+        run(&mut svc);
+
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1, "the weekend is one recording");
+        let laps = svc.db.lock().list_laps(sessions[0].id).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| l.stint).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the race laps belong to their own stint"
+        );
+        assert_eq!(
+            laps.iter().map(|l| l.stint_kind).collect::<Vec<_>>(),
+            vec![Some(SessionKind::Qualifying), Some(SessionKind::Race)],
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn phase_change_stores_the_new_kind_so_the_next_one_is_seen() {
+        // ACC can report the weekend's last phase for the first announce, before
+        // the session the driver is actually in settles. Holding that stale kind
+        // made the real Q → R change compare equal and vanish, dropping the race
+        // into the qualifying stint with the game's lap numbers restarting.
+        let events = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Race,
+        ))];
+        let (dir, mut svc) = service_pit_aware(events);
+        run(&mut svc);
+
+        let mut quali = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Qualifying,
+        ))];
+        quali.extend(telemetry(6));
+        quali.push(lap_completed(1, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new_pit_aware(quali)));
+        run(&mut svc);
+        assert_eq!(svc.current_stint, 1, "nothing recorded yet to split from");
+
+        let mut race = vec![AdapterEvent::SessionInfo(session_info_kind(
+            "monza",
+            SessionKind::Race,
+        ))];
+        race.extend(telemetry(6));
+        race.push(lap_completed(1, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new_pit_aware(race)));
+        run(&mut svc);
+
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_kind,
+            SessionKind::Qualifying,
+            "the entry kind is re-labelled while the session has no laps"
+        );
+        let laps = svc.db.lock().list_laps(sessions[0].id).unwrap();
+        assert_eq!(
+            laps.iter().map(|l| (l.stint, l.stint_kind)).collect::<Vec<_>>(),
+            vec![
+                (1, Some(SessionKind::Qualifying)),
+                (2, Some(SessionKind::Race)),
+            ],
+            "the second phase change is not swallowed by the stale kind"
         );
         drop(dir);
     }
