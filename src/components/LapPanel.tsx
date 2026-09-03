@@ -11,6 +11,7 @@ import {
   fuelUnitLabel,
   usePreferences,
 } from "../lib/preferences";
+import { findShortLaps, formatDistanceKm } from "../lib/lapDistance";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
 import {
   formatStintBreak,
@@ -80,6 +81,7 @@ export function LapPanel({
     () => computeSessionLapStats(laps, game ?? undefined),
     [laps, game],
   );
+  const shortLapIds = useMemo(() => findShortLaps(laps), [laps]);
   const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
 
   return (
@@ -188,6 +190,16 @@ export function LapPanel({
                         )}
                         {!lap.valid && (
                           <span className="tag invalid review-inline-tag">!</span>
+                        )}
+                        {shortLapIds.has(lap.id) && (
+                          <span
+                            className="tag short-lap review-inline-tag"
+                            title={`Covered ${formatDistanceKm(
+                              lap.lap_distance_m ?? 0,
+                            )} — less of the track than a full lap here, so its time and its trace do not compare with one`}
+                          >
+                            Short
+                          </span>
                         )}
                       </span>
                     </td>

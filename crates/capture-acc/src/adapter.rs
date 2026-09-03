@@ -463,6 +463,27 @@ impl AccAdapter {
 
 
 
+    /// Fold ACC's lap counter back in when it moves *backwards*.
+    ///
+    /// ACC restarts `completedLaps` when it throws a lap away: a joker lap
+    /// round the GP loop at the Nurburgring 24h is invalidated and both the
+    /// counter and the lap timer reset. Of the places `poll` writes
+    /// `last_completed_laps`, only the taken-boundary one can lower it, and
+    /// the reset seldom lands on that exact tick — during the scoring grace
+    /// window `poll` returns early through the `pending_lap` branch, so a drop
+    /// seen there went unrecorded. The stale high value then holds
+    /// `acc_scored` false until ACC climbs back past it, and every real lap in
+    /// between falls back to the sampled live-timer peak instead of ACC's
+    /// exact `iLastTime`.
+    ///
+    /// A counter that went down is a reset, never a scored lap. `-1` is the
+    /// "no session read yet" sentinel and is left for `poll` to initialise.
+    fn resync_completed_laps(&mut self, completed_lap: i32) {
+        if self.last_completed_laps >= 0 && completed_lap < self.last_completed_laps {
+            self.last_completed_laps = completed_lap;
+        }
+    }
+
     /// Take the lap that just ended at a start/finish boundary and park it in
     /// `pending_lap`. `poll` calls this once per crossing, whether the boundary
     /// was seen as an ACC `completed_lap` increment or as a
@@ -901,6 +922,8 @@ impl GameAdapter for AccAdapter {
         let crossed_sf = self.last_norm_pos > 0.90 && norm < 0.10;
         self.last_norm_pos = norm;
 
+        self.resync_completed_laps(graphics.completed_lap);
+
         let acc_scored = self.last_completed_laps >= 0
             && graphics.completed_lap > self.last_completed_laps;
 
@@ -1294,6 +1317,37 @@ mod tests {
         assert!(adapter.score_pending_lap(0, 4).is_none(), "lap dropped");
         assert_eq!(adapter.lap_counter, 0, "a dropped lap takes no number");
         assert_eq!(adapter.pending_lap_started, Some(1));
+    }
+
+    #[test]
+    fn a_lap_counter_reset_resyncs_instead_of_stalling_scoring() {
+        // Nurburgring 24h joker lap: ACC invalidates the GP-loop lap and
+        // restarts `completedLaps`. Left stale at 5, the tracker would swallow
+        // the next five real laps' worth of increments and none of them would
+        // read as ACC-scored.
+        let mut adapter = AccAdapter::new();
+        adapter.last_completed_laps = 5;
+
+        adapter.resync_completed_laps(0);
+        assert_eq!(adapter.last_completed_laps, 0, "a drop is a reset");
+
+        // The lap after the joker now scores on its own increment.
+        adapter.resync_completed_laps(1);
+        assert_eq!(
+            adapter.last_completed_laps, 0,
+            "a climb is left for the boundary to take"
+        );
+        assert!(1 > adapter.last_completed_laps, "and reads as ACC-scored");
+    }
+
+    #[test]
+    fn an_unset_lap_counter_survives_the_resync() {
+        // `-1` means "no session read yet" — `poll` owns that transition, and
+        // resyncing must not claim it first.
+        let mut adapter = AccAdapter::new();
+        assert_eq!(adapter.last_completed_laps, -1);
+        adapter.resync_completed_laps(7);
+        assert_eq!(adapter.last_completed_laps, -1);
     }
 
     /// An adapter sitting where a lap starts: index 0, nothing captured yet.

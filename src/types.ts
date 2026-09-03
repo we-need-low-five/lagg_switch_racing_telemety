@@ -53,6 +53,13 @@ export interface LapRecord {
   stint_break_s?: number | null;
   /** Weekend phase this stint belongs to, when the sim reports one. */
   stint_kind?: SessionKind | null;
+  /**
+   * Metres the car drove over the lap, measured from its recorded positions.
+   * Separates a full lap from one that reached the same start/finish line by a
+   * shorter route — a joker lap round the Nurburgring 24h GP loop. Null when
+   * the trace held no usable positions.
+   */
+  lap_distance_m?: number | null;
 }
 
 export interface DistanceSample {

@@ -5,9 +5,9 @@ use sim_capture_ac::AcAdapter;
 use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
-    channel_manifest_json, compute_fuel_used_l, resample_to_distance_grid, session_car_changed,
-    session_kind_changed, session_track_changed, AdapterEvent, GameAdapter, GameId, RecordingStatus,
-    SessionInfo, SessionKind, TelemetrySample,
+    channel_manifest_json, compute_fuel_used_l, lap_distance_m, resample_to_distance_grid,
+    session_car_changed, session_kind_changed, session_track_changed, AdapterEvent, GameAdapter,
+    GameId, RecordingStatus, SessionInfo, SessionKind, TelemetrySample,
 };
 use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
@@ -429,6 +429,12 @@ impl RecordingService {
             self.pending_stint_break
         };
 
+        // Measured from the raw samples rather than the grid: these carry every
+        // position the sim reported, so this is the ground the car actually
+        // covered. Zero means the trace held no usable positions — store nothing
+        // and leave it to the read-time backfill to try again from the parquet.
+        let driven_m = lap_distance_m(&self.current_lap_samples);
+
         let lap_id = Uuid::new_v4();
         let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
         let abs = resolve_data_relative(&self.data_dir, &rel)?;
@@ -445,6 +451,7 @@ impl RecordingService {
             self.current_stint,
             stint_break_s,
             self.current_stint_kind,
+            (driven_m > 0.0).then_some(driven_m),
         ) {
             let _ = std::fs::remove_file(&abs);
             return Err(err);
@@ -1109,6 +1116,50 @@ mod tests {
         assert_eq!(laps.len(), 2);
         assert!(!laps[0].valid, "the lap straddling the freeze is invalid");
         assert!(laps[1].valid, "the next clean lap is unaffected");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_lap_records_the_ground_it_covered() {
+        // `telemetry` walks pos_x in 50 m steps, so ten samples drove 450 m.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry(10));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        assert_eq!(laps.len(), 1);
+        let measured = laps[0].lap_distance_m.expect("the lap is measured");
+        assert!((measured - 450.0).abs() < 1.0, "got {measured}");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_short_lap_measures_shorter_than_a_full_one() {
+        // The Nurburgring 24h case in miniature: two laps to the same
+        // start/finish line, the second round a fraction of the route. Their
+        // times say nothing about that; the ground they covered does.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info(
+            "nurburgring_24h",
+            "Nurburgring 24h",
+        ))];
+        events.extend(telemetry(20));
+        events.push(lap_completed(1, true));
+        events.extend(telemetry(5));
+        events.push(lap_completed(2, false));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        assert_eq!(laps.len(), 2);
+        let full = laps[0].lap_distance_m.unwrap();
+        let short = laps[1].lap_distance_m.unwrap();
+        assert!(short < full * 0.5, "short {short} against full {full}");
         drop(dir);
     }
 

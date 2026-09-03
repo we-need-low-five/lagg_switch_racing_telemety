@@ -282,6 +282,12 @@ pub struct LapRecord {
     /// when the sim reports one. `None` on legacy rows and untyped stints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stint_kind: Option<SessionKind>,
+    /// Metres the car drove over the lap, measured from its recorded positions.
+    /// Separates a full lap from one that reached the same start/finish line by
+    /// a shorter route — a joker lap round the Nurburgring 24h GP loop. `None`
+    /// on laps recorded before the measure existed and never backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lap_distance_m: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

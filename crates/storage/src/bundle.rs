@@ -153,7 +153,7 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
             .filter(|k| *k != SessionKind::Unknown)
             .map(|k| k.as_str());
         db.conn().execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind, lap_distance_m) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             rusqlite::params![
                 new_lap_id.to_string(),
                 session_id.to_string(),
@@ -170,6 +170,9 @@ pub fn import_session_bundle(db: &Database, data_dir: &Path, bundle_path: &Path)
                 lap.stint.max(1),
                 lap.stint_break_s,
                 stint_kind_token,
+                // `None` on bundles written before the measure existed; the
+                // read-time backfill takes those from the imported trace.
+                lap.lap_distance_m,
             ],
         )?;
         db.conn().execute(

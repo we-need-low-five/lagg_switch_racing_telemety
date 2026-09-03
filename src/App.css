@@ -2358,3 +2358,24 @@ button.color-picker-swatch:hover {
     display: none;
   }
 }
+
+/* Laps on the compare charts that did not cover the same route — see
+   `findLapRouteMismatch`. Warning, not an error: the laps still draw. */
+.compare-route-warning {
+  margin: 0 0 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 12px;
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 35%, transparent);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+/* A lap that covered materially less of the track than a full one beside it —
+   see `findShortLaps`. Sits next to the invalid tag, which says the lap was
+   thrown out but not that it went a different way round. */
+.tag.short-lap {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}

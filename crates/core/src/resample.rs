@@ -146,6 +146,36 @@ fn lerp_opt(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
     }
 }
 
+/// Metres of track a lap actually covered, from the recorded positions.
+///
+/// This is driven distance, not spline progress: a lap that leaves the recorded
+/// route and rejoins it later measures what the car drove, not the gap it
+/// skipped. On the Nurburgring 24h layout that separates a full 25.4 km lap
+/// from a joker lap round the GP loop alone, which is 4.6 km of the same spline
+/// and crosses the same start/finish line.
+pub fn lap_distance_m(samples: &[TelemetrySample]) -> f32 {
+    build_cumulative_distance(samples)
+        .last()
+        .copied()
+        .unwrap_or(0.0)
+}
+
+/// The same measure taken from an already-resampled lap, for laps recorded
+/// before the distance was stored. The grid holds `DISTANCE_GRID_POINTS`
+/// positions spaced evenly along the lap, so summing the chords between them
+/// understates the true arc by a fraction of a percent — far inside the margin
+/// that separates a full lap from a short one.
+pub fn grid_distance_m(grid: &[DistanceSample]) -> f32 {
+    let mut total = 0.0f32;
+    for i in 1..grid.len() {
+        let dx = grid[i].pos_x - grid[i - 1].pos_x;
+        let dy = grid[i].pos_y - grid[i - 1].pos_y;
+        let dz = grid[i].pos_z - grid[i - 1].pos_z;
+        total += (dx * dx + dy * dy + dz * dz).sqrt().max(0.0);
+    }
+    total
+}
+
 fn build_cumulative_distance(samples: &[TelemetrySample]) -> Vec<f32> {
     let mut cumulative = vec![0.0f32; samples.len()];
     for i in 1..samples.len() {

@@ -33,6 +33,10 @@ import {
   yRangeForChannel,
   type ChartYRange,
 } from "../../lib/chartYScale";
+import {
+  findLapRouteMismatch,
+  formatDistanceKm,
+} from "../../lib/lapDistance";
 import type { TrackLayout } from "../../lib/trackLayout";
 import {
   type CompareLapMeta,
@@ -387,6 +391,30 @@ export function LapCompareView({
     [selectedMetas, samples],
   );
 
+  // Laps that did not go round the same way as the rest. The charts align on
+  // distance into the lap, so mixing routes silently rescales one against the
+  // other; say so rather than hide the lap, which is a real one the driver ran.
+  const routeMismatch = useMemo(
+    () =>
+      findLapRouteMismatch(
+        metasWithSamples.map((meta) => meta.lapId),
+        samples,
+      ),
+    [metasWithSamples, samples],
+  );
+
+  const routeMismatchLabels = useMemo(() => {
+    if (!routeMismatch) return "";
+    const byId = new Map(metasWithSamples.map((meta) => [meta.lapId, meta]));
+    return routeMismatch.short
+      .map((entry) => {
+        const meta = byId.get(entry.lapId);
+        const name = meta ? formatCompareLapLabel(meta, mode) : "A lap";
+        return `${name} (${formatDistanceKm(entry.distanceM)})`;
+      })
+      .join(", ");
+  }, [routeMismatch, metasWithSamples, mode]);
+
   const chartSeries = useMemo(() => {
     return metasWithSamples.map((meta) => {
       let lapSamples = samples[meta.lapId] ?? [];
@@ -698,6 +726,15 @@ export function LapCompareView({
   return (
     <>
       {error && <p className="error">{error}</p>}
+
+      {routeMismatch && (
+        <p className="compare-route-warning">
+          {routeMismatchLabels} covered less of the track than the longest lap
+          here ({formatDistanceKm(routeMismatch.longestM)}). Charts line up on
+          distance into the lap, so these traces are stretched against each
+          other and the deltas between them are not comparable.
+        </p>
+      )}
 
       <div className="compare-page-grid" ref={gridRef}>
         <div

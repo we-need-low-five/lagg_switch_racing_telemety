@@ -93,9 +93,16 @@ Frontend-only (no Rust/tray):
 ```powershell
 npm run dev                # Vite only — Tauri IPC will not work
 npm run build              # tsc && vite build → dist/
+npm run test               # vitest run — unit tests for src/lib
+npm run test:watch         # vitest in watch mode
 npm run preview            # preview production frontend
 npm run build:tracks       # regenerate public/tracks/*.json (network)
 ```
+
+Vitest covers the pure helpers under `src/lib` (`*.test.ts` beside the module
+it tests). There is no DOM environment configured — component tests would need
+`jsdom` adding first. `npm run build` type-checks the test files along with
+everything else under `src`.
 
 `tauri.conf.json` hooks:
 

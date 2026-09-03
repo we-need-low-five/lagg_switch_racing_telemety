@@ -108,6 +108,7 @@ impl Database {
         self.ensure_lap_stint_column()?;
         self.ensure_lap_stint_break_column()?;
         self.ensure_lap_stint_kind_column()?;
+        self.ensure_lap_distance_column()?;
         self.ensure_leaderboard_table()?;
         self.sync_leaderboard_slots_if_needed()?;
         self.backfill_leaderboard_if_empty()?;
@@ -304,6 +305,19 @@ impl Database {
         if !has_col {
             self.conn
                 .execute("ALTER TABLE laps ADD COLUMN stint_kind TEXT", [])?;
+        }
+        Ok(())
+    }
+
+    fn ensure_lap_distance_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(laps)")?;
+        let has_col = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "lap_distance_m");
+        if !has_col {
+            self.conn
+                .execute("ALTER TABLE laps ADD COLUMN lap_distance_m REAL", [])?;
         }
         Ok(())
     }
@@ -616,6 +630,7 @@ impl Database {
             1,
             None,
             SessionKind::Unknown,
+            None,
         )?;
         Ok(id)
     }
@@ -632,6 +647,7 @@ impl Database {
         stint: u32,
         stint_break_s: Option<u32>,
         stint_kind: SessionKind,
+        lap_distance_m: Option<f32>,
     ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
         let stint = stint.max(1);
@@ -640,7 +656,7 @@ impl Database {
             known => Some(known.as_str()),
         };
         self.conn.execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind, lap_distance_m) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 id.to_string(),
                 session_id.to_string(),
@@ -655,6 +671,7 @@ impl Database {
                 stint,
                 stint_break_s,
                 stint_kind_token,
+                lap_distance_m,
             ],
         )?;
         self.conn.execute(
@@ -778,9 +795,59 @@ impl Database {
         Ok(kinds)
     }
 
-    pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
+    /// Measure and store `lap_distance_m` for this session's laps that predate
+    /// the column, from the traces already on disk.
+    ///
+    /// Done per session on read rather than as a startup sweep: the work is one
+    /// parquet read per lap, which is fine for the session being opened and far
+    /// too slow across a whole library. A lap whose trace is missing or
+    /// unreadable stays `NULL` and is simply never classified.
+    fn backfill_lap_distances(&self, session_id: Uuid) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s, l.stint_kind
+            "SELECT l.id, f.parquet_path
+             FROM laps l
+             JOIN lap_files f ON f.lap_id = l.id
+             WHERE l.session_id = ?1 AND l.lap_distance_m IS NULL",
+        )?;
+        let pending: Vec<(String, String)> = stmt
+            .query_map(params![session_id.to_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        for (lap_id, rel_path) in pending {
+            let Some(distance) = self.lap_trace_distance_m(&rel_path) else {
+                continue;
+            };
+            self.conn.execute(
+                "UPDATE laps SET lap_distance_m = ?1 WHERE id = ?2",
+                params![distance, lap_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Metres covered by a stored lap, measured from its resampled trace.
+    /// `None` when the trace is missing, unreadable, or has no positions.
+    fn lap_trace_distance_m(&self, rel_path: &str) -> Option<f32> {
+        let abs = crate::paths::resolve_data_relative(&self.data_dir, rel_path).ok()?;
+        let samples = crate::parquet_io::read_lap_samples(&abs).ok()?;
+        let distance = sim_core::grid_distance_m(&samples);
+        (distance > 0.0).then_some(distance)
+    }
+
+    pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
+        if let Err(err) = self.backfill_lap_distances(session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "failed to backfill lap distances"
+            );
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s, l.stint_kind, l.lap_distance_m
              FROM laps l
              JOIN lap_files f ON f.lap_id = l.id
              WHERE l.session_id = ?1
@@ -816,6 +883,7 @@ impl Database {
                 stint_kind: row
                     .get::<_, Option<String>>(15)?
                     .map(|t| SessionKind::from_token(&t)),
+                lap_distance_m: row.get::<_, Option<f64>>(16)?.map(|v| v as f32),
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -2049,7 +2117,7 @@ mod tests {
     ) -> Uuid {
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
-        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
+        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
             .unwrap();
         lap_id
     }
@@ -2066,7 +2134,7 @@ mod tests {
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
         let mut summary = summary(lap_time_ms, true);
         summary.fuel_used_l = Some(fuel_used_l);
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
             .unwrap();
         lap_id
     }
@@ -2125,7 +2193,7 @@ mod tests {
             .unwrap();
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(dir.path(), session, lap_id, b"inv");
-        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None, SessionKind::Unknown)
+        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
             .unwrap();
 
         assert!(db.list_leaderboard_games().unwrap().is_empty());
@@ -2314,6 +2382,7 @@ mod tests {
             1,
             None,
             SessionKind::Unknown,
+        None,
         )
         .unwrap();
         db.insert_lap_with_id(
@@ -2326,6 +2395,7 @@ mod tests {
             2,
             Some(420),
             SessionKind::Unknown,
+        None,
         )
         .unwrap();
 
@@ -2510,6 +2580,94 @@ mod tests {
         assert_eq!(db.list_sessions().unwrap().len(), 2, "guard blocks re-merge");
     }
 
+    /// A lap trace that walks `step_m` along X per point, so its measured
+    /// distance is a known 99 × `step_m`.
+    fn positioned_parquet(
+        data_dir: &Path,
+        session_id: Uuid,
+        lap_id: Uuid,
+        step_m: f32,
+    ) -> String {
+        let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
+        let abs = data_dir.join(&rel);
+        fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        let samples: Vec<sim_core::DistanceSample> = (0..100)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "distance_pct": i as f32 / 99.0,
+                    "lap_time_s": i as f32,
+                    "speed_mps": 60.0,
+                    "throttle": 1.0,
+                    "brake": 0.0,
+                    "steering": 0.0,
+                    "gear": 4.0,
+                    "rpm": 7000.0,
+                    "pos_x": i as f32 * step_m,
+                    "pos_y": 0.0,
+                    "pos_z": 0.0,
+                }))
+                .unwrap()
+            })
+            .collect();
+        crate::write_lap_parquet(&abs, &samples).unwrap();
+        rel
+    }
+
+    #[test]
+    fn a_lap_from_before_the_measure_is_backfilled_from_its_trace() {
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "nurburgring_24h", "Nurburgring 24h", "car", "1.0", "Dmytro")
+            .unwrap();
+        let lap_id = Uuid::new_v4();
+        let rel = positioned_parquet(dir.path(), session, lap_id, 10.0);
+        db.insert_lap_with_id(
+            lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None,
+        )
+        .unwrap();
+
+        let stored: Option<f64> = db
+            .conn
+            .query_row(
+                "SELECT lap_distance_m FROM laps WHERE id = ?1",
+                params![lap_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.is_none(), "starts out unmeasured, like a legacy lap");
+
+        let laps = db.list_laps(session).unwrap();
+        let measured = laps[0]
+            .lap_distance_m
+            .expect("reading the session backfills the distance");
+        assert!(
+            (measured - 990.0).abs() < 1.0,
+            "99 steps of 10 m, got {measured}"
+        );
+    }
+
+    #[test]
+    fn a_trace_without_positions_stays_unmeasured() {
+        // `traced_parquet` parks every point at the origin, which is what a lap
+        // resampled off `distance_m` looks like. Guessing zero metres would call
+        // it the shortest lap on the track; it has to stay unknown.
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "car", "1.0", "Dmytro")
+            .unwrap();
+        let lap_id = Uuid::new_v4();
+        let rel = traced_parquet(dir.path(), session, lap_id, 100_000);
+        db.insert_lap_with_id(
+            lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None,
+        )
+        .unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        assert!(laps[0].lap_distance_m.is_none());
+    }
+
     /// A lap trace whose live lap timer ramps to `duration_ms` — what the repair
     /// reads back as the lap's real duration.
     fn traced_parquet(
@@ -2559,7 +2717,7 @@ mod tests {
         let rel = traced_parquet(data_dir, session_id, lap_id, trace_ms);
         let mut summary = summary(stored_ms, true);
         summary.lap_number = lap_number;
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", stint, None, kind)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", stint, None, kind, None)
             .unwrap();
         lap_id
     }
@@ -2840,6 +2998,7 @@ mod tests {
         db.insert_lap_with_id(
             lap_id, quali, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
             SessionKind::Qualifying,
+        None,
         )
         .unwrap();
 

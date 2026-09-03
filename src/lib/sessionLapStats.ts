@@ -9,7 +9,10 @@ export interface SessionLapStats {
   bestS2Ms: number | null;
   bestS3Ms: number | null;
   optimalLapMs: number | null;
+  /** Mean lap time (ms) over all laps, after dropping extreme IQR outliers. */
   averageLapMs: number | null;
+  /** Laps included in averageLapMs, after the outlier filter. */
+  averageLapCount: number;
   averageValidLapMs: number | null;
   validLapCount: number;
   /** Mean fuel used per valid lap (L), after dropping extreme IQR outliers. */
@@ -69,6 +72,7 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
       bestS3Ms: null,
       optimalLapMs: null,
       averageLapMs: null,
+      averageLapCount: 0,
       averageValidLapMs: null,
       validLapCount: 0,
       averageFuelL: null,
@@ -85,9 +89,17 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
         )
       : null);
 
-  const averageLapMs = Math.round(
-    laps.reduce((sum, lap) => sum + lap.lap_time_ms, 0) / laps.length,
+  // A lap that covered only part of the track stays in the list — it is a lap
+  // the driver ran — but its time says nothing about the pace over a full one.
+  // A Nurburgring 24h "joker" run of the GP loop alone is ~4.6 km of a 25.4 km
+  // lap and comes in around 2:30 against 8:30, so two of them pull a plain mean
+  // down by minutes. The same IQR fence that already guards the fuel mean
+  // drops them.
+  const lapTimeAvg = averageExcludingExtremeOutliers(
+    laps.map((lap) => lap.lap_time_ms),
   );
+  const averageLapMs =
+    lapTimeAvg.average != null ? Math.round(lapTimeAvg.average) : null;
 
   const averageValidLapMs =
     validLaps.length > 0
@@ -132,6 +144,7 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
     bestS3Ms: bestS3,
     optimalLapMs,
     averageLapMs,
+    averageLapCount: lapTimeAvg.usedCount,
     averageValidLapMs,
     validLapCount: validLaps.length,
     averageFuelL: fuelAvg.average,

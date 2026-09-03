@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getSession, listLaps } from "../api";
 import { displaySectorTimes } from "../lib/compareLaps";
+import { findShortLaps, formatDistanceKm } from "../lib/lapDistance";
 import {
   computeSessionLapStats,
   computeStintStatsMap,
@@ -66,6 +67,7 @@ export function SessionReview() {
     () => laps.find((l) => l.is_best) ?? laps[0],
     [laps],
   );
+  const shortLapIds = useMemo(() => findShortLaps(laps), [laps]);
   const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
   const stintStats = useMemo(
     () => computeStintStatsMap(laps, session?.game),
@@ -167,7 +169,9 @@ export function SessionReview() {
                     : "—"}
                 </span>
                 <span className="review-summary-meta muted">
-                  {laps.length} lap{laps.length === 1 ? "" : "s"}
+                  {lapStats.averageLapCount > 0
+                    ? `${lapStats.averageLapCount} lap${lapStats.averageLapCount === 1 ? "" : "s"}`
+                    : "No laps"}
                 </span>
               </div>
               <div className="review-summary-card">
@@ -285,6 +289,16 @@ export function SessionReview() {
                         )}
                         {lap.is_pinned && (
                           <span className="tag pinned review-inline-tag">★</span>
+                        )}
+                        {shortLapIds.has(lap.id) && (
+                          <span
+                            className="tag short-lap review-inline-tag"
+                            title={`Covered ${formatDistanceKm(
+                              lap.lap_distance_m ?? 0,
+                            )} — less of the track than a full lap here, so its time and its trace do not compare with one`}
+                          >
+                            Short
+                          </span>
                         )}
                       </td>
                       <td
