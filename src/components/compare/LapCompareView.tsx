@@ -729,8 +729,8 @@ export function LapCompareView({
 
       {routeMismatch && (
         <p className="compare-route-warning">
-          {routeMismatchLabels} covered less of the track than the longest lap
-          here ({formatDistanceKm(routeMismatch.longestM)}). Charts line up on
+          {routeMismatchLabels} covered less of the track than a lap here does
+          ({formatDistanceKm(routeMismatch.referenceM)}). Charts line up on
           distance into the lap, so these traces are stretched against each
           other and the deltas between them are not comparable.
         </p>

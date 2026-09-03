@@ -20,6 +20,11 @@ function grid(points: number, step: number): DistanceSample[] {
   );
 }
 
+/** A 100-point trace covering `metres` end to end. */
+function trace(metres: number): DistanceSample[] {
+  return grid(100, metres / 99);
+}
+
 // Real Nurburgring 24h figures: the full lap is 25.4 km, a joker lap round the
 // GP loop alone is 4.6 km.
 const FULL_M = 25_400;
@@ -47,18 +52,38 @@ describe("findShortLaps", () => {
     expect(short.size).toBe(0);
   });
 
-  it("marks nothing when there is no full lap to measure against", () => {
-    const short = findShortLaps([lap("c", JOKER_M), lap("e", 4_550)]);
-    expect(short.size).toBe(0);
+  it("is not thrown by an out-lap running longer than a flying lap", () => {
+    // Measured off a real Red Bull Ring session. The out-lap drives the pit
+    // lane as well as the track, so it is the longest lap there — taking the
+    // longest as the reference marked thirteen of these sixteen short.
+    const distances = [
+      4791, 4546, 4303, 4335, 4287, 4280, 4282, 4281, 4285, 4284, 4286, 4283,
+      4287, 4284, 4284, 4278,
+    ];
+    const short = findShortLaps(distances.map((m, i) => lap(String(i), m)));
+    expect([...short]).toEqual([]);
   });
 
-  it("settles the earlier laps once a full one is recorded", () => {
+  it("is not thrown by a recording that merged several crossings", () => {
+    // The 24h session that started this: lap 2's parquet spans four lap timers
+    // and 44 km of a 25 km circuit. Only the 4.6 km joker is short.
+    const short = findShortLaps([
+      lap("joker", 4_648),
+      lap("merged", 44_068),
+      lap("full", 25_156),
+    ]);
+    expect([...short]).toEqual(["joker"]);
+  });
+
+  it("marks nothing when short laps are most of the session", () => {
+    // With no full lap to speak of there is no route to be short of. Failing
+    // this way costs a missing mark, not a table full of wrong ones.
     const short = findShortLaps([
       lap("c", JOKER_M),
       lap("e", 4_550),
       lap("a", FULL_M),
     ]);
-    expect([...short].sort()).toEqual(["c", "e"]);
+    expect(short.size).toBe(0);
   });
 
   it("needs two measured laps before it marks anything", () => {
@@ -77,11 +102,13 @@ describe("findShortLaps", () => {
     expect(short.size).toBe(0);
   });
 
-  it("puts the fence at 10 % short of the longest lap", () => {
-    expect(findShortLaps([lap("a", 10_000), lap("b", 9_000)]).size).toBe(0);
-    expect([...findShortLaps([lap("a", 10_000), lap("b", 8_999)])]).toEqual([
-      "b",
-    ]);
+  it("puts the fence at 10 % short of a lap of the route", () => {
+    expect(
+      findShortLaps([lap("a", 10_000), lap("b", 10_000), lap("c", 9_000)]).size,
+    ).toBe(0);
+    expect([
+      ...findShortLaps([lap("a", 10_000), lap("b", 10_000), lap("c", 8_999)]),
+    ]).toEqual(["c"]);
   });
 });
 
@@ -99,29 +126,42 @@ describe("lapDrivenDistanceM", () => {
 describe("findLapRouteMismatch", () => {
   it("catches a joker lap overlaid on a full one", () => {
     const mismatch = findLapRouteMismatch(["full", "joker"], {
-      full: grid(100, FULL_M / 99),
-      joker: grid(100, JOKER_M / 99),
+      full: trace(FULL_M),
+      joker: trace(JOKER_M),
     });
     expect(mismatch?.short.map((s) => s.lapId)).toEqual(["joker"]);
-    expect(mismatch?.longestM).toBeCloseTo(FULL_M, 0);
+    expect(mismatch?.referenceM).toBeCloseTo((FULL_M + JOKER_M) / 2, 0);
   });
 
   it("stays quiet when both laps went the same way round", () => {
     expect(
       findLapRouteMismatch(["a", "b"], {
-        full: grid(100, 254),
-        a: grid(100, 254),
-        b: grid(100, 252),
+        a: trace(25_146),
+        b: trace(24_948),
+      }),
+    ).toBeNull();
+  });
+
+  it("does not warn when one of the two laps is just an out-lap", () => {
+    // The Red Bull Ring pair: 4791 m out-lap against a 4283 m flying lap.
+    expect(
+      findLapRouteMismatch(["out", "flying"], {
+        out: trace(4_791),
+        flying: trace(4_283),
       }),
     ).toBeNull();
   });
 
   it("reports the shortest lap first", () => {
-    const mismatch = findLapRouteMismatch(["full", "short", "shorter"], {
-      full: grid(100, FULL_M / 99),
-      short: grid(100, 10_000 / 99),
-      shorter: grid(100, JOKER_M / 99),
-    });
+    const mismatch = findLapRouteMismatch(
+      ["full", "alsoFull", "short", "shorter"],
+      {
+        full: trace(FULL_M),
+        alsoFull: trace(25_300),
+        short: trace(10_000),
+        shorter: trace(JOKER_M),
+      },
+    );
     expect(mismatch?.short.map((s) => s.lapId)).toEqual(["shorter", "short"]);
   });
 
@@ -129,11 +169,11 @@ describe("findLapRouteMismatch", () => {
     // One lap resampled off `distance_m` leaves nothing to compare against.
     expect(
       findLapRouteMismatch(["a", "b"], {
-        a: grid(100, 254),
+        a: trace(25_146),
         b: grid(100, 0),
       }),
     ).toBeNull();
-    expect(findLapRouteMismatch(["a"], { a: grid(100, 254) })).toBeNull();
+    expect(findLapRouteMismatch(["a"], { a: trace(25_146) })).toBeNull();
   });
 });
 

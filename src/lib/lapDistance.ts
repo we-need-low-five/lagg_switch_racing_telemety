@@ -9,6 +9,29 @@ import type { DistanceSample } from "../types";
 export const LAP_ROUTE_TOLERANCE = 0.1;
 
 /**
+ * What a lap of this route covers, taken as the median of the laps measured.
+ *
+ * Deliberately not the longest. An out-lap drives the pit lane *and* the track,
+ * so it runs longer than a flying lap — 4791 m against a 4283 m median over a
+ * real Red Bull Ring session — and a lap whose recording merged several
+ * crossings runs longer still, at 44 km on a 25 km circuit. Taking the longest
+ * lap as the reference put the fence above every honest lap in the session and
+ * marked thirteen of sixteen short. A median only moves once most of the laps
+ * have.
+ *
+ * The cost is that a session which is mostly short laps has no full lap to
+ * speak of and marks none of them. That is the safe direction to fail: a
+ * missing mark costs nothing, a field of wrong ones makes the tables unusable.
+ */
+function referenceDistanceM(distances: number[]): number {
+  const sorted = [...distances].sort((a, b) => a - b);
+  const mid = (sorted.length - 1) / 2;
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[Math.floor(mid)] + sorted[Math.ceil(mid)]) / 2;
+}
+
+/**
  * Metres of track a lap covered, summed from the world positions in its
  * resampled grid. Mirrors `build_cumulative_distance` in `sim-core`, which is
  * what the grid was laid out against in the first place.
@@ -27,8 +50,8 @@ export function lapDrivenDistanceM(samples: DistanceSample[]): number {
 }
 
 export interface LapRouteMismatch {
-  /** Driven distance of the longest lap on the chart, in metres. */
-  longestM: number;
+  /** What a lap of this route covers, over the laps on the chart, in metres. */
+  referenceM: number;
   /** Laps that covered materially less ground than that, shortest first. */
   short: { lapId: string; distanceM: number }[];
   distancesM: Map<string, number>;
@@ -62,23 +85,22 @@ export function findLapRouteMismatch(
   }
   if (distancesM.size < 2) return null;
 
-  const longestM = Math.max(...distancesM.values());
+  const referenceM = referenceDistanceM([...distancesM.values()]);
   const short = [...distancesM.entries()]
-    .filter(([, distanceM]) => distanceM < longestM * (1 - tolerance))
+    .filter(([, distanceM]) => distanceM < referenceM * (1 - tolerance))
     .map(([lapId, distanceM]) => ({ lapId, distanceM }))
     .sort((a, b) => a.distanceM - b.distanceM);
 
-  return short.length > 0 ? { longestM, short, distancesM } : null;
+  return short.length > 0 ? { referenceM, short, distancesM } : null;
 }
 
 /**
- * Laps that covered materially less ground than the longest measured lap beside
- * them — the ones whose time is not a time round this track.
+ * Laps that covered materially less ground than a lap of this route does — the
+ * ones whose time is not a time round this track.
  *
- * The reference is the longest lap present rather than a figure per circuit, so
- * it needs no table to maintain and rights itself: a session of nothing but
- * joker laps marks none of them, because there is nothing there to call them
- * short against, and the first full lap recorded settles the rest.
+ * The reference comes from the laps themselves (see [referenceDistanceM]) and
+ * not from a figure per circuit, so there is no table to maintain and this
+ * works the same on any layout with a short way round it.
  *
  * Laps the recorder could not measure carry no distance and are never marked.
  */
@@ -94,10 +116,10 @@ export function findShortLaps<
   }
   if (measured.length < 2) return new Set();
 
-  const longestM = Math.max(...measured.map((lap) => lap.distanceM));
+  const referenceM = referenceDistanceM(measured.map((lap) => lap.distanceM));
   return new Set(
     measured
-      .filter((lap) => lap.distanceM < longestM * (1 - tolerance))
+      .filter((lap) => lap.distanceM < referenceM * (1 - tolerance))
       .map((lap) => lap.id),
   );
 }
