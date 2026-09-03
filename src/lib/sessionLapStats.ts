@@ -1,5 +1,6 @@
 import type { GameId, LapRecord } from "../types";
 import { displaySectorTimes } from "./compareLaps";
+import { isPartialTrace } from "./lapTrace";
 import { lapStint } from "./stints";
 
 export interface SessionLapStats {
@@ -80,7 +81,11 @@ export function computeSessionLapStats(laps: LapRecord[], game?: GameId): Sessio
     };
   }
 
-  const validLaps = laps.filter((lap) => lap.valid);
+  // A lap only recorded in part counts for no more than one the sim threw out:
+  // its time stands, but its sectors and fuel belong to the fraction of the lap
+  // that was caught. Mirrors `usable_lap_sql` in `sim-storage`, which is what
+  // decided the `is_best` flag these rows carry.
+  const validLaps = laps.filter((lap) => lap.valid && !isPartialTrace(lap));
   const bestLap =
     laps.find((lap) => lap.is_best) ??
     (validLaps.length > 0

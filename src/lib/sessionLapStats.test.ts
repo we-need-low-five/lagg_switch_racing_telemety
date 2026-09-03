@@ -30,6 +30,21 @@ const FULL_MS = 510_000;
 const JOKER_MS = 150_000;
 
 describe("computeSessionLapStats", () => {
+  it("leaves a lap that was only recorded in part out of the times", () => {
+    // Quickest on the clock, but the recording caught half of it — no trace to
+    // put beside the time, so it is no more use than a lap the sim threw out.
+    const laps = [
+      lap(1, FULL_MS),
+      lap(2, 400_000, true, { trace_coverage: 0.42 }),
+      lap(3, 508_000),
+    ];
+
+    const stats = computeSessionLapStats(laps);
+
+    expect(stats.bestLap?.lap_number).toBe(3);
+    expect(stats.validLapCount).toBe(2);
+  });
+
   it("keeps a joker lap out of the average", () => {
     const laps = [
       lap(1, FULL_MS),

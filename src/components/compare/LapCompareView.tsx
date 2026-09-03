@@ -37,6 +37,7 @@ import {
   findLapRouteMismatch,
   formatDistanceKm,
 } from "../../lib/lapDistance";
+import { formatCoveragePct, isPartialTrace } from "../../lib/lapTrace";
 import type { TrackLayout } from "../../lib/trackLayout";
 import {
   type CompareLapMeta,
@@ -403,6 +404,26 @@ export function LapCompareView({
     [metasWithSamples, samples],
   );
 
+  // Laps whose recording is a fragment of the lap rather than the whole of it.
+  // Same consequence as a different route and a different cause: the charts
+  // normalise every trace onto 0-100 % of its own length, so a fragment is
+  // stretched to the width of a whole lap and lines up against nothing.
+  const partialTraceLabels = useMemo(
+    () =>
+      metasWithSamples
+        .filter((meta) =>
+          isPartialTrace({ trace_coverage: meta.traceCoverage }),
+        )
+        .map(
+          (meta) =>
+            `${formatCompareLapLabel(meta, mode)} (${formatCoveragePct(
+              meta.traceCoverage ?? 0,
+            )})`,
+        )
+        .join(", "),
+    [metasWithSamples, mode],
+  );
+
   const routeMismatchLabels = useMemo(() => {
     if (!routeMismatch) return "";
     const byId = new Map(metasWithSamples.map((meta) => [meta.lapId, meta]));
@@ -726,6 +747,16 @@ export function LapCompareView({
   return (
     <>
       {error && <p className="error">{error}</p>}
+
+      {partialTraceLabels && (
+        <p className="compare-route-warning">
+          {partialTraceLabels} recorded only that much of the lap, so it does
+          not count as a lap of this track. The charts line up on distance into
+          the lap and stretch each trace over the whole of it, which puts a
+          part-recorded lap at the wrong place on the track and makes its
+          deltas meaningless.
+        </p>
+      )}
 
       {routeMismatch && (
         <p className="compare-route-warning">

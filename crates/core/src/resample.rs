@@ -146,6 +146,137 @@ fn lerp_opt(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
     }
 }
 
+/// How much of a lap a trace has to cover before it counts as a whole recording
+/// of that lap rather than a fragment of one.
+///
+/// The two per cent missing is room for the ordinary edges of a recording: the
+/// poll that lands just after the start/finish line, and — on ACC — the ~180 ms
+/// the adapter holds telemetry back while it waits for the sim to put a time on
+/// the crossing. A truncated lap misses far more than that: a physics freeze
+/// costs at least ten seconds by definition, and a recording that attached
+/// mid-lap misses the whole run up to it.
+pub const COMPLETE_TRACE_COVERAGE: f32 = 0.98;
+
+/// A step between consecutive samples longer than this is a hole in the
+/// recording rather than sampling jitter. Games are polled at tens of hertz, so
+/// an honest step is milliseconds; a second is already orders of magnitude out.
+const TRACE_GAP_S: f32 = 1.0;
+
+/// Whether a lap measured at this coverage was recorded whole, and so is worth
+/// keeping: a fragment is not a lap of the track, whatever time the sim put on
+/// it, and the recorder stores it invalid.
+///
+/// An unmeasurable trace (`None`) counts as whole. The lap is stored either
+/// way, and throwing out laps for a fault the measure could not see is worse
+/// than missing one it could.
+pub fn trace_is_whole(coverage: Option<f32>) -> bool {
+    coverage.is_none_or(|c| c >= COMPLETE_TRACE_COVERAGE)
+}
+
+/// The fraction of the lap the recorded trace actually covers, read off the
+/// sim's own lap timer.
+///
+/// Every adapter fills `lap_time_s` from the live lap timer, which resets at the
+/// start/finish line, so this measures the same thing on every game: what the
+/// trace is missing is the time before its first sample, the time after its
+/// last, and any hole in between.
+///
+/// This is what separates the two reasons a lap can be no good. A lap the sim
+/// scored invalid for a cut has a whole trace and still compares perfectly
+/// well against a clean lap; a lap whose recording is a fragment does not,
+/// because [`resample_to_distance_grid`] stretches that fragment across the
+/// full width of the chart. The first is worth drawing, the second is not
+/// usable at all — and a single `valid` flag cannot tell them apart.
+///
+/// `None` when there is nothing to measure against: no lap time, or fewer than
+/// two samples.
+pub fn trace_coverage(samples: &[TelemetrySample], lap_time_ms: u32) -> Option<f32> {
+    coverage_of_lap_times(samples.iter().map(|s| s.lap_time_s), lap_time_ms, true)
+}
+
+/// The same measure taken from an already-resampled lap, for laps recorded
+/// before the coverage was stored.
+///
+/// The grid keeps each point's absolute `lap_time_s`, so a trace that started
+/// late or stopped early still shows it. What the grid cannot show is a hole in
+/// the middle: resampling spaces its points evenly over the distance driven,
+/// which closes the gap up. Backfilled laps are measured on their edges alone —
+/// enough for the common cases, and never an overstatement of what is missing.
+pub fn grid_trace_coverage(grid: &[DistanceSample], lap_time_ms: u32) -> Option<f32> {
+    coverage_of_lap_times(grid.iter().map(|s| s.lap_time_s), lap_time_ms, false)
+}
+
+/// `count_holes` looks at the steps between samples as well as the edges. Only
+/// raw telemetry earns that: a grid's points are spread evenly over the lap, so
+/// on a long circuit its own spacing is seconds wide and every step would read
+/// as a hole.
+fn coverage_of_lap_times(
+    times: impl Iterator<Item = f32>,
+    lap_time_ms: u32,
+    count_holes: bool,
+) -> Option<f32> {
+    if lap_time_ms == 0 {
+        return None;
+    }
+    let lap_s = lap_time_ms as f32 / 1000.0;
+    let times: Vec<f32> = times.collect();
+    let (from, to) = lap_run(&times, lap_s)?;
+    if to - from < 1 {
+        return None;
+    }
+
+    let mut holes = 0.0f32;
+    if count_holes {
+        for i in (from + 1)..=to {
+            let step = times[i] - times[i - 1];
+            if step > TRACE_GAP_S {
+                holes += step;
+            }
+        }
+    }
+
+    let head = times[from].max(0.0);
+    let tail = (lap_s - times[to]).max(0.0);
+    Some((1.0 - (head + tail + holes) / lap_s).clamp(0.0, 1.0))
+}
+
+/// The stretch of the trace belonging to the lap it was recorded for, as an
+/// inclusive index range.
+///
+/// The lap timer resets at the start/finish line, so a step *backwards* means
+/// the samples either side of it were timed against different laps. A trace
+/// usually holds a handful of those at one end — the sim crosses the line a few
+/// polls before the adapter scores the crossing, so the last samples of a lap
+/// carry the next lap's timer, reading 0.07 s at the end of a 109 s lap. Taking
+/// the trace's final value as its end read those laps as 0.1 % recorded, and
+/// they were whole.
+///
+/// The lap's own run is the one lying inside the lap's own timing window — it
+/// starts near zero and ends near the lap time — so the runs are scored on how
+/// much of `0..lap_s` they cover. Deliberately *not* the longest run: one real
+/// trace opens with two minutes of a stale timer reading 589 s to 712 s before
+/// the lap itself starts over at 0.17 s, and length alone picks the stale one.
+fn lap_run(times: &[f32], lap_s: f32) -> Option<(usize, usize)> {
+    if times.len() < 2 {
+        return None;
+    }
+    let mut best: Option<((usize, usize), f32)> = None;
+    let mut start = 0usize;
+    for i in 1..=times.len() {
+        let broke = i == times.len() || times[i] < times[i - 1];
+        if !broke {
+            continue;
+        }
+        let end = i - 1;
+        let covered = times[end].min(lap_s) - times[start].max(0.0);
+        if best.is_none_or(|(_, best_covered)| covered > best_covered) {
+            best = Some(((start, end), covered));
+        }
+        start = i;
+    }
+    best.map(|(run, _)| run)
+}
+
 /// Metres of track a lap actually covered, from the recorded positions.
 ///
 /// This is driven distance, not spline progress: a lap that leaves the recorded
@@ -288,6 +419,148 @@ mod tests {
         assert!(grid.iter().all(|s| s.gear >= 4.0));
         assert!(grid.iter().any(|s| s.gear >= 5.0));
         assert!(grid.iter().all(|s| (s.gear - s.gear.round()).abs() < 1e-5));
+    }
+
+    /// A trace running from `from_s` to `to_s` of a lap, sampled at 10 Hz.
+    fn trace(from_s: f32, to_s: f32) -> Vec<TelemetrySample> {
+        let mut samples = Vec::new();
+        let mut t = from_s;
+        while t <= to_s + 1e-3 {
+            let mut s = sample(0, None);
+            s.lap_time_s = t;
+            samples.push(s);
+            t += 0.1;
+        }
+        samples
+    }
+
+    #[test]
+    fn a_whole_trace_covers_its_lap() {
+        let coverage = trace_coverage(&trace(0.0, 90.0), 90_000).unwrap();
+        assert!(
+            coverage >= COMPLETE_TRACE_COVERAGE,
+            "a trace over the whole lap reads complete, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn a_trace_that_started_late_measures_short() {
+        // The recorder attached a third of the way round: the lap time is the
+        // sim's and real, but only two thirds of it was ever recorded.
+        let coverage = trace_coverage(&trace(30.0, 90.0), 90_000).unwrap();
+        assert!((coverage - 2.0 / 3.0).abs() < 0.01, "got {coverage}");
+        assert!(coverage < COMPLETE_TRACE_COVERAGE);
+    }
+
+    #[test]
+    fn a_trace_that_stopped_early_measures_short() {
+        let coverage = trace_coverage(&trace(0.0, 60.0), 90_000).unwrap();
+        assert!((coverage - 2.0 / 3.0).abs() < 0.01, "got {coverage}");
+    }
+
+    #[test]
+    fn a_hole_in_the_middle_measures_short() {
+        // A physics freeze from 40 s to 70 s of the lap.
+        let mut samples = trace(0.0, 40.0);
+        samples.extend(trace(70.0, 90.0));
+        let coverage = trace_coverage(&samples, 90_000).unwrap();
+        assert!((coverage - 2.0 / 3.0).abs() < 0.01, "got {coverage}");
+    }
+
+    #[test]
+    fn sampling_jitter_is_not_a_hole() {
+        // A slow poll rate is still a whole recording of the lap.
+        let samples: Vec<TelemetrySample> = (0..=180)
+            .map(|i| {
+                let mut s = sample(0, None);
+                s.lap_time_s = i as f32 * 0.5;
+                s
+            })
+            .collect();
+        let coverage = trace_coverage(&samples, 90_000).unwrap();
+        assert!(coverage >= COMPLETE_TRACE_COVERAGE, "got {coverage}");
+    }
+
+    #[test]
+    fn a_grids_own_spacing_is_not_read_as_holes() {
+        // A long lap resampled onto the grid puts seconds between its points.
+        // Measured like raw telemetry that would read as one hole after
+        // another and call a whole lap a fragment.
+        let grid: Vec<DistanceSample> = (0..=200)
+            .map(|i| {
+                let mut s = interpolate_sample(&sample(0, None), &sample(0, None), 0.0, i, 4, 4);
+                s.lap_time_s = i as f32 * 2.5;
+                s
+            })
+            .collect();
+        let coverage = grid_trace_coverage(&grid, 500_000).unwrap();
+        assert!(coverage >= COMPLETE_TRACE_COVERAGE, "got {coverage}");
+    }
+
+    #[test]
+    fn samples_from_after_the_line_do_not_shorten_the_lap() {
+        // Taken from a real Monza lap: the trace runs the lap out to 109.50 s
+        // and then carries four samples timed against the lap that had just
+        // started. Reading the last of those as the end of the trace called a
+        // whole lap 0.1 % recorded.
+        let mut samples = trace(0.32, 109.50);
+        samples.extend(trace(0.01, 0.07));
+        let coverage = trace_coverage(&samples, 109_515).unwrap();
+        assert!(
+            coverage >= COMPLETE_TRACE_COVERAGE,
+            "the lap was recorded end to end, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn samples_from_before_the_line_do_not_shorten_the_lap() {
+        // The same at the other end: a stray tail of the lap before.
+        let mut samples = trace(88.0, 88.2);
+        samples.extend(trace(0.1, 90.0));
+        let coverage = trace_coverage(&samples, 90_000).unwrap();
+        assert!(coverage >= COMPLETE_TRACE_COVERAGE, "got {coverage}");
+    }
+
+    #[test]
+    fn a_reset_does_not_hide_a_fragment() {
+        // Strays are dropped, but the run that is left is still measured: this
+        // one only starts half way round.
+        let mut samples = trace(45.0, 90.0);
+        samples.extend(trace(0.01, 0.05));
+        let coverage = trace_coverage(&samples, 90_000).unwrap();
+        assert!((coverage - 0.5).abs() < 0.02, "got {coverage}");
+    }
+
+    #[test]
+    fn a_stale_timer_before_the_lap_does_not_win() {
+        // Taken from a real Watkins Glen recording: two minutes of a timer left
+        // over from an earlier lap, then the lap itself, timed from scratch.
+        // Picking the longest run took the stale one and read the lap as never
+        // recorded; the lap's own run is the one inside 0..lap_time.
+        let mut samples = trace(589.49, 712.12);
+        samples.extend(trace(0.17, 106.84));
+        let coverage = trace_coverage(&samples, 107_010).unwrap();
+        assert!(
+            coverage >= COMPLETE_TRACE_COVERAGE,
+            "the lap itself was recorded whole, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn a_lap_with_no_time_or_no_trace_is_not_measured() {
+        assert_eq!(trace_coverage(&trace(0.0, 90.0), 0), None);
+        assert_eq!(trace_coverage(&trace(0.0, 0.0), 90_000), None);
+    }
+
+    #[test]
+    fn grid_coverage_reads_a_backfilled_lap_off_its_edges() {
+        let mut samples = trace(30.0, 90.0);
+        for (i, s) in samples.iter_mut().enumerate() {
+            s.pos_x = i as f32 * 10.0;
+        }
+        let grid = resample_to_distance_grid(&samples);
+        let coverage = grid_trace_coverage(&grid, 90_000).unwrap();
+        assert!((coverage - 2.0 / 3.0).abs() < 0.01, "got {coverage}");
     }
 
     #[test]

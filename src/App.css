@@ -2379,3 +2379,11 @@ button.color-picker-swatch:hover {
   background: var(--color-warning-bg);
   color: var(--color-warning-text);
 }
+
+/* A lap whose recording is a fragment of it — see `isPartialTrace`. Sits next
+   to the invalid tag and says why that lap is invalid: not a cut, but a lap
+   there is no whole recording of. */
+.tag.partial-trace {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}

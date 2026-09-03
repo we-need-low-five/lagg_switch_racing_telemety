@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { getSession, listLaps } from "../api";
 import { displaySectorTimes } from "../lib/compareLaps";
 import { findShortLaps, formatDistanceKm } from "../lib/lapDistance";
+import { findPartialTraces, formatCoveragePct } from "../lib/lapTrace";
 import {
   computeSessionLapStats,
   computeStintStatsMap,
@@ -68,6 +69,7 @@ export function SessionReview() {
     [laps],
   );
   const shortLapIds = useMemo(() => findShortLaps(laps), [laps]);
+  const partialTraceIds = useMemo(() => findPartialTraces(laps), [laps]);
   const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
   const stintStats = useMemo(
     () => computeStintStatsMap(laps, session?.game),
@@ -261,7 +263,12 @@ export function SessionReview() {
                       : lap.is_best
                         ? 0
                         : null;
-                  const rowClass = lap.valid ? "" : "invalid-lap";
+                  // Partial as well as invalid: neither counts towards the
+                  // session's times, so neither reads as an ordinary lap.
+                  const rowClass =
+                    lap.valid && !partialTraceIds.has(lap.id)
+                      ? ""
+                      : "invalid-lap";
 
                   return (
                     <tr
@@ -298,6 +305,16 @@ export function SessionReview() {
                             )} — less of the track than a full lap here, so its time and its trace do not compare with one`}
                           >
                             Short
+                          </span>
+                        )}
+                        {partialTraceIds.has(lap.id) && (
+                          <span
+                            className="tag partial-trace review-inline-tag"
+                            title={`Only ${formatCoveragePct(
+                              lap.trace_coverage ?? 0,
+                            )} of this lap was recorded — the trace is a fragment stretched over the whole chart, so the lap does not count towards the session's times`}
+                          >
+                            Partial
                           </span>
                         )}
                       </td>

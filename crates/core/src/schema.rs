@@ -288,6 +288,17 @@ pub struct LapRecord {
     /// on laps recorded before the measure existed and never backfilled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lap_distance_m: Option<f32>,
+    /// Fraction of the lap its trace actually covers, from the sim's lap timer.
+    /// Below [`crate::COMPLETE_TRACE_COVERAGE`] the recording is a fragment — it
+    /// started late, stopped early, or lost a stretch to a physics freeze — and
+    /// the resampled grid stretches that fragment over the whole chart. Such a
+    /// lap is stored `valid = false`: there is no lap of this track to show for
+    /// it, whatever time the sim put on it. This is what says *why* a lap is
+    /// invalid — a lap the sim cut for track limits carries a complete trace
+    /// and is still worth drawing. `None` on laps recorded before the measure
+    /// existed and never backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_coverage: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

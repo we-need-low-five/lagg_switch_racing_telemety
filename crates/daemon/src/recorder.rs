@@ -6,8 +6,9 @@ use sim_capture_f1::F1Adapter;
 use sim_capture_lmu::LmuAdapter;
 use sim_core::{
     channel_manifest_json, compute_fuel_used_l, lap_distance_m, resample_to_distance_grid,
-    session_car_changed, session_kind_changed, session_track_changed, AdapterEvent, GameAdapter,
-    GameId, RecordingStatus, SessionInfo, SessionKind, TelemetrySample,
+    session_car_changed, session_kind_changed, session_track_changed, trace_coverage,
+    AdapterEvent, GameAdapter, GameId, RecordingStatus, SessionInfo, SessionKind,
+    TelemetrySample,
 };
 use sim_storage::{resolve_data_relative, write_lap_parquet, Database};
 use std::path::PathBuf;
@@ -143,15 +144,19 @@ impl RecordingService {
                 if std::mem::take(&mut self.stint_gap_during_lap) {
                     // Telemetry for this lap was truncated by a >10 s physics
                     // freeze — the trace is unusable, so don't trust the lap.
+                    // `flush_lap` throws out a fragmentary trace on its own
+                    // measure; this still earns its keep for the freeze that
+                    // landed early enough to leave most of the lap recorded
+                    // and the sim stopped dead all the same.
                     summary.valid = false;
                 }
                 if let Some(session_id) = self.session_id {
-                    if self.flush_lap(session_id, &summary)? {
+                    if let Some(flushed) = self.flush_lap(session_id, &summary)? {
                         notification = Some(format!(
                             "Lap {} saved — {} ({})",
                             summary.lap_number,
                             format_lap_time(summary.lap_time_ms),
-                            if summary.valid { "valid" } else { "invalid" }
+                            lap_state_label(summary.valid, flushed.trace_is_whole())
                         ));
                     }
                 }
@@ -401,12 +406,12 @@ impl RecordingService {
         ))
     }
 
-    /// Returns true when a lap was persisted.
+    /// Returns what was persisted, or `None` when the lap was skipped.
     fn flush_lap(
         &mut self,
         session_id: Uuid,
         summary: &sim_core::LapSummary,
-    ) -> Result<bool> {
+    ) -> Result<Option<FlushedLap>> {
         let mut summary = summary.clone();
         if summary.fuel_used_l.is_none() {
             summary.fuel_used_l = compute_fuel_used_l(&self.current_lap_samples);
@@ -419,7 +424,7 @@ impl RecordingService {
                 lap_time_ms = summary.lap_time_ms,
                 "skipping lap with insufficient telemetry or zero time"
             );
-            return Ok(false);
+            return Ok(None);
         }
 
         // Only the first persisted lap of a fresh stint carries the break marker.
@@ -434,6 +439,19 @@ impl RecordingService {
         // covered. Zero means the trace held no usable positions — store nothing
         // and leave it to the read-time backfill to try again from the parquet.
         let driven_m = lap_distance_m(&self.current_lap_samples);
+
+        // Measured from the raw samples for the same reason as the distance:
+        // the grid closes a hole in the middle back up.
+        //
+        // A lap recorded in fragments is not a lap of this track — its trace is
+        // stretched over ground it never covered, and its sectors and fuel
+        // belong to whatever part of it was caught. Storing the measure is
+        // enough to keep it out of the best lap, the leaderboard and the
+        // session's averages: `sim_storage` reads those off `usable_lap_sql`,
+        // which asks for a whole trace as well as a valid lap. `valid` itself
+        // stays the sim's verdict, so a measure that ever reads a lap wrong
+        // costs a label rather than the lap.
+        let coverage = trace_coverage(&self.current_lap_samples, summary.lap_time_ms);
 
         let lap_id = Uuid::new_v4();
         let rel = format!("sessions/{session_id}/laps/{lap_id}.parquet");
@@ -452,13 +470,14 @@ impl RecordingService {
             stint_break_s,
             self.current_stint_kind,
             (driven_m > 0.0).then_some(driven_m),
+            coverage,
         ) {
             let _ = std::fs::remove_file(&abs);
             return Err(err);
         }
         self.laps_in_current_stint = true;
         self.pending_stint_break = None;
-        Ok(true)
+        Ok(Some(FlushedLap { coverage }))
     }
 
     fn finalize_session_message(&mut self) -> String {
@@ -522,6 +541,30 @@ fn create_adapter(game: GameId) -> Box<dyn GameAdapter> {
         GameId::Ac => Box::new(AcAdapter::new()),
         GameId::Lmu => Box::new(LmuAdapter::new()),
         GameId::F1_25 => Box::new(F1Adapter::new()),
+    }
+}
+
+/// A lap that went to disk, and what the recorder learned about its trace on
+/// the way there.
+struct FlushedLap {
+    /// Fraction of the lap the recording covers, `None` when unmeasurable.
+    coverage: Option<f32>,
+}
+
+impl FlushedLap {
+    fn trace_is_whole(&self) -> bool {
+        sim_core::trace_is_whole(self.coverage)
+    }
+}
+
+/// How a saved lap is described in the notification. `valid` is what the sim
+/// made of the lap; a lap recorded in fragments is thrown out whatever that
+/// was, so it is worth saying which of the two happened.
+fn lap_state_label(valid: bool, trace_is_whole: bool) -> &'static str {
+    match (valid, trace_is_whole) {
+        (_, false) => "unusable — partial trace",
+        (true, true) => "valid",
+        (false, true) => "invalid",
     }
 }
 
@@ -929,7 +972,7 @@ mod tests {
     #[test]
     fn stint_bumps_after_gap_with_recorded_laps() {
         let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
-        events.extend(telemetry(6));
+        events.extend(whole_lap());
         events.push(lap_completed(1, true));
         let (dir, mut svc) = service(events);
         run(&mut svc);
@@ -941,9 +984,9 @@ mod tests {
         assert_eq!(svc.current_stint, 2, "a gap after real laps opens a new stint");
         assert_eq!(note.as_deref(), Some("Stint 2 — break detected"));
 
-        let mut resume = telemetry(6);
+        let mut resume = whole_lap();
         resume.push(lap_completed(2, true));
-        resume.extend(telemetry(6));
+        resume.extend(whole_lap());
         resume.push(lap_completed(3, true));
         svc.adapter = Some(Box::new(FakeAdapter::new(resume)));
         run(&mut svc);
@@ -970,10 +1013,10 @@ mod tests {
     fn pit_out_boundary_opens_a_break_less_stint() {
         // Return-to-garage: adapter emits StintBoundary, no physics freeze.
         let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
-        events.extend(telemetry(6));
+        events.extend(whole_lap());
         events.push(lap_completed(1, true));
         events.push(AdapterEvent::StintBoundary);
-        events.extend(telemetry(6));
+        events.extend(whole_lap());
         events.push(lap_completed(2, true));
         let (dir, mut svc) = service_pit_aware(events);
 
@@ -1106,7 +1149,7 @@ mod tests {
         // Resume: finish the truncated lap, then run a clean one.
         let mut resume = telemetry(6);
         resume.push(lap_completed(1, true));
-        resume.extend(telemetry(6));
+        resume.extend(whole_lap());
         resume.push(lap_completed(2, true));
         svc.adapter = Some(Box::new(FakeAdapter::new(resume)));
         run(&mut svc);
@@ -1160,6 +1203,102 @@ mod tests {
         let full = laps[0].lap_distance_m.unwrap();
         let short = laps[1].lap_distance_m.unwrap();
         assert!(short < full * 0.5, "short {short} against full {full}");
+        drop(dir);
+    }
+
+    /// Telemetry covering `from`..`to` of a lap at the helper's 50 m spacing,
+    /// which is 0.83 s per sample against `lap_completed`'s 100 s lap: 120
+    /// samples is a whole lap, and starting late is a recording that attached
+    /// part-way round.
+    fn telemetry_range(from: usize, to: usize) -> Vec<AdapterEvent> {
+        (from..to)
+            .map(|i| AdapterEvent::Telemetry(sample(i as f32 * 50.0)))
+            .collect()
+    }
+
+    /// A recording of a whole lap: `lap_completed` times the lap at 100 s and
+    /// the samples step 0.83 s each, so this covers the lap end to end and the
+    /// lap is usable. Tests that assert a lap stays valid need one — a lap the
+    /// recorder only caught part of is thrown out on its coverage alone.
+    fn whole_lap() -> Vec<AdapterEvent> {
+        telemetry_range(0, 121)
+    }
+
+    #[test]
+    fn a_cut_lap_is_invalid_with_a_whole_trace() {
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry_range(0, 120));
+        events.push(lap_completed(1, false));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        let coverage = laps[0].trace_coverage.expect("the trace is measured");
+        assert!(!laps[0].valid, "the sim scored the lap invalid");
+        assert!(
+            coverage >= sim_core::COMPLETE_TRACE_COVERAGE,
+            "a cut lap is still recorded whole, got {coverage}"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn a_recording_that_attached_mid_lap_does_not_count() {
+        // The sim scored the lap and its time is real, but half of it was never
+        // recorded: there is no trace of this lap round the track to show. The
+        // sim's verdict is kept as it was and the lap stops counting on the
+        // measure — it is not the session's best lap however quick it reads.
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry_range(60, 120));
+        events.push(lap_completed(1, true));
+        let (dir, mut svc) = service(events);
+
+        run(&mut svc);
+
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        let coverage = laps[0].trace_coverage.expect("the trace is measured");
+        assert!((coverage - 0.5).abs() < 0.02, "got {coverage}");
+        assert!(laps[0].valid, "the sim's verdict is left alone");
+        assert!(
+            !laps[0].is_best,
+            "but a lap recorded in part is not the session's best lap"
+        );
+        let sessions = svc.db.lock().list_sessions().unwrap();
+        assert_eq!(
+            sessions[0].best_lap_time_ms, None,
+            "and the session has no best lap to show"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn a_lap_truncated_by_a_freeze_is_partial_as_well_as_invalid() {
+        let mut events = vec![AdapterEvent::SessionInfo(session_info("monza", "Monza"))];
+        events.extend(telemetry_range(0, 30));
+        let (dir, mut svc) = service(events);
+        run(&mut svc);
+
+        svc.expire_heartbeat();
+        let _ = svc.tick().unwrap();
+
+        // Resume half a lap later and finish the lap: the freeze cleared the
+        // buffer, so what is stored starts where the sim came back.
+        let mut resume = telemetry_range(90, 120);
+        resume.push(lap_completed(1, true));
+        svc.adapter = Some(Box::new(FakeAdapter::new(resume)));
+        run(&mut svc);
+
+        let session = svc.db.lock().list_sessions().unwrap()[0].id;
+        let laps = svc.db.lock().list_laps(session).unwrap();
+        let coverage = laps[0].trace_coverage.expect("the trace is measured");
+        assert!(!laps[0].valid, "the freeze taints the lap itself");
+        assert!(
+            coverage < sim_core::COMPLETE_TRACE_COVERAGE,
+            "and the trace it left is a fragment, got {coverage}"
+        );
         drop(dir);
     }
 

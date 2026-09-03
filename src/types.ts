@@ -60,6 +60,17 @@ export interface LapRecord {
    * the trace held no usable positions.
    */
   lap_distance_m?: number | null;
+  /**
+   * Fraction of the lap its trace actually covers, from the sim's lap timer.
+   * Below COMPLETE_TRACE_COVERAGE the recording is a fragment — it started
+   * late, stopped early, or lost a stretch to a physics freeze — and the
+   * resampled grid stretches that fragment across the whole chart. Such a lap
+   * is stored invalid: there is no lap of the track to show for it, whatever
+   * time the sim put on it. So this says *why* a lap is invalid — a lap cut
+   * for track limits is invalid with a perfectly whole trace. Null on laps
+   * recorded before the measure existed and never backfilled.
+   */
+  trace_coverage?: number | null;
 }
 
 export interface DistanceSample {

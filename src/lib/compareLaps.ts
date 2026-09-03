@@ -19,6 +19,8 @@ export interface CompareLapMeta {
   sectors: LapRecord["sectors"];
   sampleRateHz: number;
   isExternal: boolean;
+  /** Fraction of the lap the trace covers; see `isPartialTrace`. */
+  traceCoverage?: number | null;
 }
 
 export function lapRecordToMeta(
@@ -41,6 +43,7 @@ export function lapRecordToMeta(
     isPinned: lap.is_pinned,
     sectors: lap.sectors,
     sampleRateHz: lap.sample_rate_hz,
+    traceCoverage: lap.trace_coverage,
     isExternal,
   };
 }

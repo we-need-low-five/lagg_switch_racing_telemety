@@ -46,6 +46,27 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// SQL for a lap that counts: the sim was happy with it *and* it was recorded
+/// whole. `alias` is the table prefix — `""` or `"l."`.
+///
+/// Held in one place so everything that counts laps agrees: the session's best
+/// lap, its fuel averages, the persistent leaderboard, and the laps offered for
+/// comparison against other sessions.
+///
+/// Derived here rather than stamped onto `valid` when the lap is recorded.
+/// `trace_coverage` is a measurement, and a measurement that turns out to be
+/// wrong should cost a label, not a lap: the first version of it read the
+/// handful of samples a trace carries from after the start/finish line — where
+/// the sim's lap timer has already reset — as a lap recorded 0.1 % of the way
+/// round, and would have thrown out whole sessions of real laps had it been
+/// writing `valid`.
+fn usable_lap_sql(alias: &str) -> String {
+    format!(
+        "{alias}valid = 1 AND ({alias}trace_coverage IS NULL OR {alias}trace_coverage >= {})",
+        sim_core::COMPLETE_TRACE_COVERAGE
+    )
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let data_dir = path
@@ -109,11 +130,13 @@ impl Database {
         self.ensure_lap_stint_break_column()?;
         self.ensure_lap_stint_kind_column()?;
         self.ensure_lap_distance_column()?;
+        self.ensure_lap_trace_coverage_column()?;
         self.ensure_leaderboard_table()?;
         self.sync_leaderboard_slots_if_needed()?;
         self.backfill_leaderboard_if_empty()?;
         self.ensure_session_fuel_stats_table()?;
         self.backfill_session_fuel_stats()?;
+        self.resync_usable_lap_derivations()?;
         self.prune_lapless_sessions()?;
         self.merge_split_weekend_sessions()?;
         self.repair_misrecorded_weekends()?;
@@ -322,6 +345,22 @@ impl Database {
         Ok(())
     }
 
+    /// Fraction of the lap each trace covers (see `sim_core::trace_coverage`).
+    /// NULL on rows written before the measure existed; `backfill_lap_coverage`
+    /// fills those in from the traces on disk as their session is opened.
+    fn ensure_lap_trace_coverage_column(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(laps)")?;
+        let has_col = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "trace_coverage");
+        if !has_col {
+            self.conn
+                .execute("ALTER TABLE laps ADD COLUMN trace_coverage REAL", [])?;
+        }
+        Ok(())
+    }
+
     /// Startup sweep for sessions that never recorded a lap. Runs before the
     /// recorder starts, so any lapless session is a stale artifact (app killed
     /// mid-menu, pre-gating track flips). Leaderboard/fuel-stats rows are only
@@ -425,11 +464,11 @@ impl Database {
         drop(session_stmt);
 
         let mut lap_stmt = self.conn.prepare(
-            "SELECT lap_time_ms, valid, fuel_used_l FROM laps WHERE session_id = ?1",
+            "SELECT lap_time_ms, valid, fuel_used_l, trace_coverage FROM laps WHERE session_id = ?1",
         )?;
-        let laps: Vec<(u32, i32, Option<f64>)> = lap_stmt
+        let laps: Vec<(u32, i32, Option<f64>, Option<f64>)> = lap_stmt
             .query_map(params![session_id.to_string()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .filter_map(Result::ok)
             .collect();
@@ -437,8 +476,12 @@ impl Database {
 
         let valid: Vec<(u32, Option<f64>)> = laps
             .into_iter()
-            .filter(|(_, valid, _)| *valid != 0)
-            .map(|(t, _, fuel)| (t, fuel))
+            // A lap only recorded in part is no more use to an average than a
+            // lap the sim threw out — see `usable_lap_sql`.
+            .filter(|(_, valid, _, coverage)| {
+                *valid != 0 && sim_core::trace_is_whole(coverage.map(|c| c as f32))
+            })
+            .map(|(t, _, fuel, _)| (t, fuel))
             .collect();
         if valid.is_empty() {
             return Ok(());
@@ -631,6 +674,7 @@ impl Database {
             None,
             SessionKind::Unknown,
             None,
+            None,
         )?;
         Ok(id)
     }
@@ -648,6 +692,7 @@ impl Database {
         stint_break_s: Option<u32>,
         stint_kind: SessionKind,
         lap_distance_m: Option<f32>,
+        trace_coverage: Option<f32>,
     ) -> Result<()> {
         let sectors_json = serde_json::to_string(&summary.sectors)?;
         let stint = stint.max(1);
@@ -656,7 +701,7 @@ impl Database {
             known => Some(known.as_str()),
         };
         self.conn.execute(
-            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind, lap_distance_m) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO laps (id, session_id, lap_number, lap_time_ms, valid, is_best, is_pinned, sectors_json, tyre_compound, tc_level, abs_level, fuel_used_l, stint, stint_break_s, stint_kind, lap_distance_m, trace_coverage) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id.to_string(),
                 session_id.to_string(),
@@ -672,6 +717,7 @@ impl Database {
                 stint_break_s,
                 stint_kind_token,
                 lap_distance_m,
+                trace_coverage,
             ],
         )?;
         self.conn.execute(
@@ -684,7 +730,9 @@ impl Database {
             ],
         )?;
         self.refresh_best_lap(session_id)?;
-        if let Err(err) = self.consider_leaderboard_lap(session_id, id, summary, parquet_path) {
+        if let Err(err) =
+            self.consider_leaderboard_lap(session_id, id, summary, parquet_path, trace_coverage)
+        {
             tracing::warn!(
                 lap_id = %id,
                 session_id = %session_id,
@@ -708,10 +756,13 @@ impl Database {
             params![session_id.to_string()],
         )?;
         self.conn.execute(
-            "UPDATE laps SET is_best = 1 WHERE id = (
-                SELECT id FROM laps WHERE session_id = ?1 AND valid = 1
-                ORDER BY lap_time_ms ASC LIMIT 1
-            )",
+            &format!(
+                "UPDATE laps SET is_best = 1 WHERE id = (
+                    SELECT id FROM laps WHERE session_id = ?1 AND {}
+                    ORDER BY lap_time_ms ASC LIMIT 1
+                )",
+                usable_lap_sql("")
+            ),
             params![session_id.to_string()],
         )?;
         Ok(())
@@ -726,15 +777,16 @@ impl Database {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name, s.session_kind,
                     (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
-                    (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
+                    (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND {}) as best_lap
              FROM sessions s
              WHERE s.ended_at IS NULL
                 OR EXISTS (SELECT 1 FROM laps l WHERE l.session_id = s.id)
              ORDER BY s.started_at DESC",
-        )?;
+            usable_lap_sql("l."),
+        ))?;
         let rows = stmt.query_map([], |row| {
             let game: String = row.get(1)?;
             let started_at: String = row.get(5)?;
@@ -838,6 +890,132 @@ impl Database {
         (distance > 0.0).then_some(distance)
     }
 
+    /// Work out once again everything that was derived from "which laps count",
+    /// after the rule gained a second half: a lap now has to have been recorded
+    /// whole as well as scored valid by the sim (see [`usable_lap_sql`]).
+    ///
+    /// `is_best` flags and leaderboard slots were settled under the old rule and
+    /// are not revisited on their own — the fuel stats are, since every startup
+    /// refreshes those anyway. Stored coverage is dropped as well, so that every
+    /// lap is measured again by `backfill_lap_coverage` as its session is
+    /// opened: `trace_coverage` is a measurement, and a stored one is only as
+    /// good as the code that took it. Bump the guard's value to have laps
+    /// measured afresh whenever that code changes again.
+    ///
+    /// A session no one has opened yet still counts all its laps, which is the
+    /// position it was in before the measure existed.
+    fn resync_usable_lap_derivations(&self) -> Result<()> {
+        const RULE_VERSION: &str = "v2";
+        let done: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'usable_lap_rule'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if done.as_deref() == Some(RULE_VERSION) {
+            return Ok(());
+        }
+
+        self.conn
+            .execute("UPDATE laps SET trace_coverage = NULL", [])?;
+        let mut stmt = self.conn.prepare("SELECT id FROM sessions")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+        for id in ids {
+            if let Ok(uuid) = Uuid::parse_str(&id) {
+                if let Err(err) = self.refresh_best_lap(uuid) {
+                    tracing::warn!(
+                        session_id = %id,
+                        error = %err,
+                        "failed to settle the best lap under the usable-lap rule"
+                    );
+                }
+            }
+        }
+        if let Err(err) = self.sync_leaderboard_from_sessions() {
+            tracing::warn!(error = %err, "leaderboard resync after the rule change failed");
+        }
+
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES ('usable_lap_rule', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![RULE_VERSION],
+        )?;
+        Ok(())
+    }
+
+    /// Measure and store `trace_coverage` for this session's laps that predate
+    /// the column, from the traces already on disk, and retire the ones the
+    /// measure finds were only recorded in part.
+    ///
+    /// Runs per session on read for the same reason as `backfill_lap_distances`
+    /// — one parquet read per lap is fine for the session being opened and far
+    /// too slow across a library. A resampled trace only shows what is missing
+    /// at its edges (see `sim_core::grid_trace_coverage`), so a backfilled lap
+    /// whose hole was in the middle still reads complete; laps recorded from
+    /// here on are measured from the raw samples and do not.
+    ///
+    /// A lap found to be a fragment stops counting from here on — `is_best` and
+    /// the fuel averages are worked out again without it, and any leaderboard
+    /// slot it holds is given up, since a time set on a lap that was never
+    /// recorded whole has no trace to show beside it. Its `valid` flag is left
+    /// alone: that is the sim's verdict on the lap, not ours.
+    fn backfill_lap_coverage(&self, session_id: Uuid) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.lap_time_ms, f.parquet_path
+             FROM laps l
+             JOIN lap_files f ON f.lap_id = l.id
+             WHERE l.session_id = ?1 AND l.trace_coverage IS NULL",
+        )?;
+        let pending: Vec<(String, u32, String)> = stmt
+            .query_map(params![session_id.to_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        let mut fragments: Vec<Uuid> = Vec::new();
+        for (lap_id, lap_time_ms, rel_path) in pending {
+            let Some(coverage) = self.lap_trace_coverage(&rel_path, lap_time_ms) else {
+                continue;
+            };
+            self.conn.execute(
+                "UPDATE laps SET trace_coverage = ?1 WHERE id = ?2",
+                params![coverage, lap_id],
+            )?;
+            if sim_core::trace_is_whole(Some(coverage)) {
+                continue;
+            }
+            if let Ok(id) = Uuid::parse_str(&lap_id) {
+                fragments.push(id);
+            }
+        }
+
+        if !fragments.is_empty() {
+            tracing::info!(
+                session_id = %session_id,
+                laps = fragments.len(),
+                "found laps that were only recorded in part"
+            );
+            self.refresh_best_lap(session_id)?;
+            let _ = self.refresh_session_fuel_stats(session_id);
+            self.rebuild_leaderboard_for(&fragments)?;
+        }
+        Ok(())
+    }
+
+    fn lap_trace_coverage(&self, rel_path: &str, lap_time_ms: u32) -> Option<f32> {
+        let abs = crate::paths::resolve_data_relative(&self.data_dir, rel_path).ok()?;
+        let samples = crate::parquet_io::read_lap_samples(&abs).ok()?;
+        sim_core::grid_trace_coverage(&samples, lap_time_ms)
+    }
+
     pub fn list_laps(&self, session_id: Uuid) -> Result<Vec<LapRecord>> {
         if let Err(err) = self.backfill_lap_distances(session_id) {
             tracing::warn!(
@@ -846,8 +1024,15 @@ impl Database {
                 "failed to backfill lap distances"
             );
         }
+        if let Err(err) = self.backfill_lap_coverage(session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "failed to backfill lap trace coverage"
+            );
+        }
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s, l.stint_kind, l.lap_distance_m
+            "SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.is_best, l.is_pinned, l.sectors_json, f.sample_rate_hz, l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, l.stint, l.stint_break_s, l.stint_kind, l.lap_distance_m, l.trace_coverage
              FROM laps l
              JOIN lap_files f ON f.lap_id = l.id
              WHERE l.session_id = ?1
@@ -884,6 +1069,7 @@ impl Database {
                     .get::<_, Option<String>>(15)?
                     .map(|t| SessionKind::from_token(&t)),
                 lap_distance_m: row.get::<_, Option<f64>>(16)?.map(|v| v as f32),
+                trace_coverage: row.get::<_, Option<f64>>(17)?.map(|v| v as f32),
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -1558,12 +1744,13 @@ impl Database {
     }
 
     pub fn get_session(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT s.id, s.game, s.track_id, s.track, s.car, s.started_at, s.ended_at, s.game_version, s.player_name, s.session_kind,
                     (SELECT COUNT(*) FROM laps l WHERE l.session_id = s.id) as lap_count,
-                    (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND l.valid = 1) as best_lap
+                    (SELECT MIN(lap_time_ms) FROM laps l WHERE l.session_id = s.id AND {}) as best_lap
              FROM sessions s WHERE s.id = ?1",
-        )?;
+            usable_lap_sql("l."),
+        ))?;
         let record = {
             let mut rows = stmt.query(params![session_id.to_string()])?;
             let Some(row) = rows.next()? else {
@@ -1677,8 +1864,14 @@ impl Database {
         lap_id: Uuid,
         summary: &LapSummary,
         source_parquet_rel: &str,
+        trace_coverage: Option<f32>,
     ) -> Result<()> {
-        if !summary.valid || summary.lap_time_ms == 0 {
+        // A lap recorded in part has no trace to put beside its time, so it
+        // never takes a leaderboard slot — see `usable_lap_sql`.
+        if !summary.valid
+            || summary.lap_time_ms == 0
+            || !sim_core::trace_is_whole(trace_coverage)
+        {
             return Ok(());
         }
         let Some(session) = self.get_session(session_id)? else {
@@ -1824,16 +2017,17 @@ impl Database {
                 return Ok(());
             }
         }
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid, l.sectors_json,
                    l.tyre_compound, l.tc_level, l.abs_level, l.fuel_used_l, f.parquet_path
             FROM laps l
             JOIN lap_files f ON f.lap_id = l.id
-            WHERE l.valid = 1
+            WHERE {}
             ORDER BY l.lap_time_ms ASC, l.id ASC
             "#,
-        )?;
+            usable_lap_sql("l."),
+        ))?;
         let rows = stmt.query_map([], |row| {
             let sectors_json: String = row.get(5)?;
             Ok((
@@ -1866,9 +2060,15 @@ impl Database {
             let Ok(session_uuid) = Uuid::parse_str(&session_id) else {
                 continue;
             };
-            if let Err(err) =
-                self.consider_leaderboard_lap(session_uuid, lap_uuid, &summary, &parquet_path)
-            {
+            // `None` for the coverage: the query above already selected on
+            // `usable_lap_sql`, so every lap here was recorded whole.
+            if let Err(err) = self.consider_leaderboard_lap(
+                session_uuid,
+                lap_uuid,
+                &summary,
+                &parquet_path,
+                None,
+            ) {
                 tracing::warn!(
                     lap_id,
                     session_id,
@@ -1921,13 +2121,13 @@ impl Database {
         track_name: &str,
     ) -> Result<Vec<TrackLapOption>> {
         let game_json = serde_json::to_string(&game)?;
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT l.id, l.session_id, l.lap_number, l.lap_time_ms, l.valid,
                    s.player_name, s.car, s.started_at, l.sectors_json
             FROM laps l
             INNER JOIN sessions s ON s.id = l.session_id
-            WHERE l.valid = 1
+            WHERE {}
               AND s.game = ?1
               AND (
                 (?2 != '' AND s.track_id = ?2)
@@ -1935,7 +2135,8 @@ impl Database {
               )
             ORDER BY l.lap_time_ms ASC
             "#,
-        )?;
+            usable_lap_sql("l."),
+        ))?;
         let session_rows = stmt.query_map(
             params![game_json, track_id, track_name],
             map_track_lap_row,
@@ -2117,7 +2318,7 @@ mod tests {
     ) -> Uuid {
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
-        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
+        db.insert_lap_with_id(lap_id, session_id, &summary(lap_time_ms, true), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None, None)
             .unwrap();
         lap_id
     }
@@ -2134,7 +2335,7 @@ mod tests {
         let rel = dummy_parquet(data_dir, session_id, lap_id, marker);
         let mut summary = summary(lap_time_ms, true);
         summary.fuel_used_l = Some(fuel_used_l);
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None, None)
             .unwrap();
         lap_id
     }
@@ -2193,7 +2394,7 @@ mod tests {
             .unwrap();
         let lap_id = Uuid::new_v4();
         let rel = dummy_parquet(dir.path(), session, lap_id, b"inv");
-        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None)
+        db.insert_lap_with_id(lap_id, session, &summary(90_000, false), &rel, 100.0, "{}", 1, None, SessionKind::Unknown, None, None)
             .unwrap();
 
         assert!(db.list_leaderboard_games().unwrap().is_empty());
@@ -2382,7 +2583,8 @@ mod tests {
             1,
             None,
             SessionKind::Unknown,
-        None,
+            None,
+            None,
         )
         .unwrap();
         db.insert_lap_with_id(
@@ -2395,7 +2597,8 @@ mod tests {
             2,
             Some(420),
             SessionKind::Unknown,
-        None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -2623,7 +2826,7 @@ mod tests {
         let rel = positioned_parquet(dir.path(), session, lap_id, 10.0);
         db.insert_lap_with_id(
             lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
-            SessionKind::Unknown, None,
+            SessionKind::Unknown, None, None,
         )
         .unwrap();
 
@@ -2648,6 +2851,101 @@ mod tests {
     }
 
     #[test]
+    fn a_lap_from_before_the_measure_has_its_coverage_backfilled() {
+        // The trace's lap timer runs to 50 s while the lap itself took 100 s:
+        // half the lap was never recorded, and the resampled grid still shows
+        // it at the edges.
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "car", "1.0", "Dmytro")
+            .unwrap();
+        let lap_id = Uuid::new_v4();
+        let rel = traced_parquet(dir.path(), session, lap_id, 50_000);
+        db.insert_lap_with_id(
+            lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None, None,
+        )
+        .unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        let coverage = laps[0]
+            .trace_coverage
+            .expect("reading the session backfills the coverage");
+        assert!((coverage - 0.5).abs() < 0.01, "got {coverage}");
+        assert!(coverage < sim_core::COMPLETE_TRACE_COVERAGE);
+    }
+
+    #[test]
+    fn a_legacy_lap_recorded_in_part_stops_counting_when_its_session_is_opened() {
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "Ferrari", "1.0", "Dmytro")
+            .unwrap();
+
+        // Recorded before the measure existed: the quicker lap was only caught
+        // from half way round, and stood as the personal best on the strength
+        // of a time nothing can be drawn for.
+        let fragment = Uuid::new_v4();
+        let rel = traced_parquet(dir.path(), session, fragment, 50_000);
+        db.insert_lap_with_id(
+            fragment, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None, None,
+        )
+        .unwrap();
+        let whole = Uuid::new_v4();
+        let rel = traced_parquet(dir.path(), session, whole, 105_000);
+        db.insert_lap_with_id(
+            whole, session, &summary(105_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None, None,
+        )
+        .unwrap();
+        let board = db.get_leaderboard(GameId::Acc, "monza", "Monza").unwrap();
+        assert_eq!(board[0].lap_time_ms, 100_000, "the fragment held the record");
+
+        let laps = db.list_laps(session).unwrap();
+
+        let fragment_row = laps.iter().find(|l| l.id == fragment).unwrap();
+        assert!(
+            fragment_row.valid,
+            "the sim's verdict on the lap is not rewritten"
+        );
+        assert!(
+            !fragment_row.is_best,
+            "but the lap stops counting once its trace is measured"
+        );
+        let whole_row = laps.iter().find(|l| l.id == whole).unwrap();
+        assert!(whole_row.valid && whole_row.is_best, "the best lap moves");
+        let board = db.get_leaderboard(GameId::Acc, "monza", "Monza").unwrap();
+        assert_eq!(board.len(), 1);
+        assert_eq!(
+            board[0].lap_time_ms, 105_000,
+            "and the leaderboard goes with it"
+        );
+    }
+
+    #[test]
+    fn a_whole_legacy_trace_backfills_as_complete() {
+        let (dir, db) = open_temp();
+        let session = db
+            .create_session(GameId::Acc, "monza", "Monza", "car", "1.0", "Dmytro")
+            .unwrap();
+        let lap_id = Uuid::new_v4();
+        let rel = traced_parquet(dir.path(), session, lap_id, 100_000);
+        db.insert_lap_with_id(
+            lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
+            SessionKind::Unknown, None, None,
+        )
+        .unwrap();
+
+        let laps = db.list_laps(session).unwrap();
+        let coverage = laps[0].trace_coverage.expect("measured");
+        assert!(
+            coverage >= sim_core::COMPLETE_TRACE_COVERAGE,
+            "got {coverage}"
+        );
+    }
+
+    #[test]
     fn a_trace_without_positions_stays_unmeasured() {
         // `traced_parquet` parks every point at the origin, which is what a lap
         // resampled off `distance_m` looks like. Guessing zero metres would call
@@ -2660,7 +2958,7 @@ mod tests {
         let rel = traced_parquet(dir.path(), session, lap_id, 100_000);
         db.insert_lap_with_id(
             lap_id, session, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
-            SessionKind::Unknown, None,
+            SessionKind::Unknown, None, None,
         )
         .unwrap();
 
@@ -2717,7 +3015,7 @@ mod tests {
         let rel = traced_parquet(data_dir, session_id, lap_id, trace_ms);
         let mut summary = summary(stored_ms, true);
         summary.lap_number = lap_number;
-        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", stint, None, kind, None)
+        db.insert_lap_with_id(lap_id, session_id, &summary, &rel, 100.0, "{}", stint, None, kind, None, None)
             .unwrap();
         lap_id
     }
@@ -2998,7 +3296,8 @@ mod tests {
         db.insert_lap_with_id(
             lap_id, quali, &summary(100_000, true), &rel, 100.0, "{}", 1, None,
             SessionKind::Qualifying,
-        None,
+            None,
+            None,
         )
         .unwrap();
 

@@ -12,6 +12,7 @@ import {
   usePreferences,
 } from "../lib/preferences";
 import { findShortLaps, formatDistanceKm } from "../lib/lapDistance";
+import { findPartialTraces, formatCoveragePct } from "../lib/lapTrace";
 import { computeSessionLapStats } from "../lib/sessionLapStats";
 import {
   formatStintBreak,
@@ -82,6 +83,7 @@ export function LapPanel({
     [laps, game],
   );
   const shortLapIds = useMemo(() => findShortLaps(laps), [laps]);
+  const partialTraceIds = useMemo(() => findPartialTraces(laps), [laps]);
   const multiStint = useMemo(() => sessionHasMultipleStints(laps), [laps]);
 
   return (
@@ -160,7 +162,11 @@ export function LapPanel({
                 return (
                   <tr
                     key={lap.id}
-                    className={lap.valid ? undefined : "invalid-lap"}
+                    className={
+                      lap.valid && !partialTraceIds.has(lap.id)
+                        ? undefined
+                        : "invalid-lap"
+                    }
                     onClick={() => onToggleLap(lap.id)}
                   >
                     <td
@@ -199,6 +205,16 @@ export function LapPanel({
                             )} — less of the track than a full lap here, so its time and its trace do not compare with one`}
                           >
                             Short
+                          </span>
+                        )}
+                        {partialTraceIds.has(lap.id) && (
+                          <span
+                            className="tag partial-trace review-inline-tag"
+                            title={`Only ${formatCoveragePct(
+                              lap.trace_coverage ?? 0,
+                            )} of this lap was recorded — the trace is a fragment stretched over the whole chart, so the lap does not count towards the session's times`}
+                          >
+                            Partial
                           </span>
                         )}
                       </span>
