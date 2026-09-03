@@ -82,6 +82,11 @@ pub struct AccAdapter {
 
     last_sector_index: i32,
 
+    /// Sector whose split ACC still owes us: 0 = S1, 1 = S2. Armed when
+    /// `current_sector_index` moves, cleared by the first tick that carries a
+    /// usable `iLastSectorTime`.
+    pending_sector_index: Option<i32>,
+
     session_announced: bool,
 
     last_track_id: String,
@@ -200,6 +205,8 @@ impl AccAdapter {
 
             last_sector_index: -1,
 
+            pending_sector_index: None,
+
             session_announced: false,
 
             last_track_id: String::new(),
@@ -309,6 +316,7 @@ impl AccAdapter {
         self.last_physics_packet = -1;
 
         self.last_sector_index = -1;
+        self.pending_sector_index = None;
 
         self.current_lap_valid = true;
 
@@ -387,17 +395,34 @@ impl AccAdapter {
 
 
 
-    fn update_sector_times(&mut self, graphics: &GraphicsMap) {
-        if graphics.current_sector_index != self.last_sector_index && graphics.last_sector_time > 0
-        {
-            // ACC current_sector_index is 0-based (0=S1, 1=S2, 2=S3).
-            // last_sector_time at S1/S2 lines is cumulative elapsed; S3 is derived at lap end.
-            match self.last_sector_index {
-                0 => self.sector_times.s1_ms = Some(graphics.last_sector_time as u32),
-                1 => self.sector_times.s2_ms = Some(graphics.last_sector_time as u32),
-                _ => {}
-            }
-            self.last_sector_index = graphics.current_sector_index;
+    /// ACC current_sector_index is 0-based (0=S1, 1=S2, 2=S3).
+    /// last_sector_time at S1/S2 lines is cumulative elapsed; S3 is derived at lap end.
+    ///
+    /// The index has to advance on its own, because ACC holds `iLastSectorTime`
+    /// at 0 through the start of a lap. Gating the advance on a usable split
+    /// stranded `last_sector_index` on S3 whenever the crossing was seen before
+    /// ACC flipped the index to S1, and it stayed a sector behind for the rest of
+    /// the lap: the S1 line was read as the lap-start flip and its split thrown
+    /// away, then the S2 line filed cumulative-S2 as the S2 split with no S1 left
+    /// to subtract. A Nordschleife lap came back as S1 blank, S2 5:33.
+    fn update_sector_times(&mut self, sector_index: i32, last_sector_time: i32) {
+        if sector_index != self.last_sector_index {
+            // Leaving index 0 finishes S1, leaving index 1 finishes S2. Anything
+            // else (S3, or the -1 sentinel) owes us nothing.
+            self.pending_sector_index = match self.last_sector_index {
+                index @ (0 | 1) => Some(index),
+                _ => None,
+            };
+            self.last_sector_index = sector_index;
+        }
+
+        if last_sector_time <= 0 {
+            return;
+        }
+        match self.pending_sector_index.take() {
+            Some(0) => self.sector_times.s1_ms = Some(last_sector_time as u32),
+            Some(1) => self.sector_times.s2_ms = Some(last_sector_time as u32),
+            _ => {}
         }
     }
 
@@ -462,6 +487,7 @@ impl AccAdapter {
             s3_ms: None,
         };
         self.last_sector_index = graphics.current_sector_index;
+        self.pending_sector_index = None;
         self.current_lap_valid = true;
         self.current_lap_in_pit = false;
         self.max_current_time_ms = 0;
@@ -528,6 +554,7 @@ impl AccAdapter {
         self.last_physics_packet = -1;
 
         self.last_sector_index = -1;
+        self.pending_sector_index = None;
 
         self.current_lap_valid = true;
 
@@ -717,6 +744,7 @@ impl GameAdapter for AccAdapter {
             self.last_completed_laps = graphics.completed_lap;
 
             self.last_sector_index = graphics.current_sector_index;
+            self.pending_sector_index = None;
 
             if let Ok(physics) = parse_physics_map(self.physics_reader.as_ref().unwrap()) {
 
@@ -804,6 +832,7 @@ impl GameAdapter for AccAdapter {
             self.last_completed_laps = graphics.completed_lap;
 
             self.last_sector_index = graphics.current_sector_index;
+            self.pending_sector_index = None;
 
             if let Ok(physics) = parse_physics_map(self.physics_reader.as_ref().unwrap()) {
 
@@ -837,7 +866,7 @@ impl GameAdapter for AccAdapter {
         // invalidate the lap that just finished.
         let lap_valid_before_tick = self.current_lap_valid;
 
-        self.update_sector_times(&graphics);
+        self.update_sector_times(graphics.current_sector_index, graphics.last_sector_time);
 
         self.track_lap_state(&graphics, physics.speed_kmh);
 
@@ -1252,6 +1281,74 @@ mod tests {
         assert!(adapter.score_pending_lap(0, 4).is_none(), "lap dropped");
         assert_eq!(adapter.lap_counter, 0, "a dropped lap takes no number");
         assert_eq!(adapter.pending_lap_started, Some(1));
+    }
+
+    /// An adapter sitting where a lap starts: index 0, nothing captured yet.
+    fn adapter_on_lap_start() -> AccAdapter {
+        let mut adapter = AccAdapter::new();
+        adapter.last_sector_index = 0;
+        adapter
+    }
+
+    #[test]
+    fn sector_lines_capture_cumulative_splits() {
+        let mut adapter = adapter_on_lap_start();
+
+        adapter.update_sector_times(1, 176_222);
+        adapter.update_sector_times(2, 338_282);
+
+        assert_eq!(adapter.sector_times.s1_ms, Some(176_222));
+        assert_eq!(adapter.sector_times.s2_ms, Some(338_282));
+    }
+
+    #[test]
+    fn a_split_that_lands_a_tick_late_still_files_under_its_own_sector() {
+        // Nordschleife: ACC flipped to S2 while iLastSectorTime was still 0, then
+        // published the split on the next tick. Before the pending slot existed
+        // the index stayed at 0, so the S2 line filed cumulative-S2 as S1 and the
+        // lap came back with S1 = 5:38 and S2 blank.
+        let mut adapter = adapter_on_lap_start();
+
+        adapter.update_sector_times(1, 0);
+        adapter.update_sector_times(1, 176_222);
+        adapter.update_sector_times(2, 338_282);
+
+        assert_eq!(adapter.sector_times.s1_ms, Some(176_222));
+        assert_eq!(adapter.sector_times.s2_ms, Some(338_282));
+    }
+
+    #[test]
+    fn a_split_zeroed_across_the_line_does_not_desync_the_next_lap() {
+        // The reported failure: the crossing was seen while ACC still read S3, and
+        // the S3 -> S1 flip arrived with iLastSectorTime at 0. The index has to
+        // advance anyway, or every line for the rest of the lap is read one sector
+        // early — S1 lost, cumulative-S2 filed as the S2 split.
+        let mut adapter = AccAdapter::new();
+        adapter.last_sector_index = 2;
+
+        adapter.update_sector_times(0, 0);
+        assert_eq!(adapter.last_sector_index, 0, "the lap-start flip counts");
+
+        adapter.update_sector_times(1, 176_222);
+        adapter.update_sector_times(2, 338_282);
+
+        assert_eq!(adapter.sector_times.s1_ms, Some(176_222));
+        assert_eq!(adapter.sector_times.s2_ms, Some(338_282));
+    }
+
+    #[test]
+    fn the_s3_line_owes_no_split() {
+        // S3 is derived from the lap time at the crossing, so leaving index 2
+        // must not overwrite a captured sector.
+        let mut adapter = adapter_on_lap_start();
+        adapter.update_sector_times(1, 176_222);
+        adapter.update_sector_times(2, 338_282);
+
+        adapter.update_sector_times(0, 517_182);
+
+        assert_eq!(adapter.sector_times.s1_ms, Some(176_222));
+        assert_eq!(adapter.sector_times.s2_ms, Some(338_282));
+        assert_eq!(adapter.sector_times.s3_ms, None);
     }
 }
 
