@@ -42,6 +42,18 @@ const SESSION_UNSET: i32 = i32::MIN;
 /// An out-lap ACC never scores always burns the whole window.
 const SCORING_GRACE_POLLS: u32 = 60;
 
+/// How far into a lap a boundary re-arms, so one crossing seen as both a wrap
+/// and an ACC-scored lap cannot be taken twice.
+///
+/// This was a lap-fraction window — `normalized_car_position` between 0.20 and
+/// 0.80 — which a lap covering less than a fifth of the spline never cleared.
+/// On the Nurburgring 24h layout a lap of the GP loop alone is 4.6 km of a
+/// 25.4 km spline, so the boundary stayed disarmed after the first one and the
+/// next three crossings were dropped: their telemetry ran into the following
+/// lap's recording, whose samples then spanned 44 km and four lap timers.
+/// Elapsed time does not care how long the lap is.
+const BOUNDARY_SETTLE_MS: i32 = 5_000;
+
 
 
 const PHYSICS_NAME: &str = "Local\\acpmf_physics";
@@ -882,8 +894,8 @@ impl GameAdapter for AccAdapter {
 
         // Lap boundary: the car wrapped past the start/finish line, or ACC
         // scored a lap we didn't catch as a wrap (a poll gap). Take it once per
-        // crossing — `boundary_settled` clears until the car is unambiguously
-        // into the next lap so the two signals can't double-fire.
+        // crossing — `boundary_settled` clears until the new lap is
+        // unambiguously under way so the two signals can't double-fire.
         let norm = graphics.normalized_car_position;
         // `last_norm_pos` starts at -1.0, so `> 0.90` also rules out the sentinel.
         let crossed_sf = self.last_norm_pos > 0.90 && norm < 0.10;
@@ -891,7 +903,8 @@ impl GameAdapter for AccAdapter {
 
         let acc_scored = self.last_completed_laps >= 0
             && graphics.completed_lap > self.last_completed_laps;
-        if (0.20..0.80).contains(&norm) {
+
+        if graphics.current_time >= BOUNDARY_SETTLE_MS {
             self.boundary_settled = true;
         }
 
