@@ -1923,7 +1923,8 @@ textarea {
 .segment-delta-strip .segment-cell.selected .segment-cell-value,
 .segment-delta-strip .segment-cell.selected .segment-cell-value.positive,
 .segment-delta-strip .segment-cell.selected .segment-cell-value.negative,
-.segment-delta-strip .segment-cell.selected .segment-cell-value.time {
+.segment-delta-strip .segment-cell.selected .segment-cell-value.time,
+.segment-delta-strip .segment-cell.selected .segment-cell-value.unavailable {
   color: inherit;
 }
 
@@ -1942,6 +1943,10 @@ textarea {
 
 .segment-cell-value.time {
   color: var(--text-primary);
+}
+
+.segment-cell-value.unavailable {
+  color: var(--text-muted);
 }
 
 /* —— Compare layout: splitters & collapsible —— */

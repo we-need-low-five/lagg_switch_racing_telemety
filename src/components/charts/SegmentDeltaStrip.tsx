@@ -1,7 +1,8 @@
 import type { CSSProperties } from "react";
 
 interface SegmentDeltaStripProps {
-  values: number[];
+  /** Null where the lap could not measure that segment. */
+  values: (number | null)[];
   mode: "delta" | "time";
   lapColor: string;
   fullLapTime: string;
@@ -55,14 +56,20 @@ export function SegmentDeltaStrip({
           <span className="segment-cell-label">S{i + 1}</span>
           <span
             className={`segment-cell-value ${
-              mode === "time"
-                ? "time"
-                : value <= 0
-                  ? "positive"
-                  : "negative"
+              value == null
+                ? "unavailable"
+                : mode === "time"
+                  ? "time"
+                  : value <= 0
+                    ? "positive"
+                    : "negative"
             }`}
           >
-            {mode === "time" ? formatTime(value) : formatDelta(value)}
+            {value == null
+              ? "—"
+              : mode === "time"
+                ? formatTime(value)
+                : formatDelta(value)}
           </span>
         </button>
       ))}
