@@ -18,6 +18,14 @@ const ACC_TRACKS = {
   indianapolis: { name: "Indianapolis", rtapi: 36 },
   suzuka: { name: "Suzuka", tum: "Suzuka" },
   nurburgring: { name: "Nurburgring", tum: "Nuerburgring" },
+  // The 24h layout is the Nordschleife joined to the GP circuit via the
+  // Müllenbachschleife, so it needs a named RaceTracksAPI layout rather than
+  // that track's first one (the GP circuit).
+  nurburgring_24h: {
+    name: "Nurburgring 24h",
+    rtapi: 59,
+    rtapiLayout: "Nordschleife + Grand Prix Circuit No Arena",
+  },
   misano: { name: "Misano", rtapi: 95 },
   imola: { name: "Imola", geojson: "it-1953.geojson" },
   kyalami: { name: "Kyalami", geojson: "za-1961.geojson" },
@@ -30,6 +38,7 @@ const ACC_TRACKS = {
   paul_ricard: { name: "Paul Ricard", rtapi: 96 },
   red_bull_ring: { name: "Red Bull Ring", tum: "Spielberg", rtapi: 14 },
   zolder: { name: "Zolder", rtapi: 84 },
+  valencia: { name: "Valencia", rtapi: 97 },
 };
 
 const TARGET_POINTS = 600;
@@ -67,10 +76,14 @@ async function fetchRtapiCatalog() {
   return rtapiCatalog;
 }
 
-async function fetchRtapiOutline(trackId) {
+async function fetchRtapiOutline(trackId, layoutName) {
   const catalog = await fetchRtapiCatalog();
   const track = catalog.find((entry) => entry.id === trackId);
-  const imageId = track?.layouts?.[0]?.image_id;
+  const layouts = track?.layouts ?? [];
+  const layout = layoutName
+    ? layouts.find((entry) => entry.name === layoutName)
+    : layouts[0];
+  const imageId = layout?.image_id;
   if (!imageId) {
     return null;
   }
@@ -190,7 +203,7 @@ async function loadTrackPoints(trackId, config) {
     }
   }
   if (config.rtapi) {
-    const raw = (await fetchRtapiOutline(config.rtapi)) ?? [];
+    const raw = (await fetchRtapiOutline(config.rtapi, config.rtapiLayout)) ?? [];
     if (raw.length >= 10) {
       return { source: "rtapi", points: raw };
     }

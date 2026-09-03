@@ -10,6 +10,7 @@
   "indianapolis": "Indianapolis",
   "suzuka": "Suzuka",
   "nurburgring": "Nurburgring",
+  "nurburgring_24h": "Nurburgring 24h",
   "misano": "Misano",
   "imola": "Imola",
   "kyalami": "Kyalami",
@@ -21,5 +22,6 @@
   "snetterton": "Snetterton",
   "paul_ricard": "Paul Ricard",
   "red_bull_ring": "Red Bull Ring",
-  "zolder": "Zolder"
+  "zolder": "Zolder",
+  "valencia": "Valencia"
 }
