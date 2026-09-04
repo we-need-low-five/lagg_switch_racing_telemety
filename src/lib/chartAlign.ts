@@ -2,6 +2,7 @@ import type uPlot from "uplot";
 import type { DistanceSample } from "../types";
 import type { DistanceRange } from "./segments";
 import { filterSamplesToRange } from "./segments";
+import { samplesBeforeLapTimerReset } from "./lapTimer";
 
 export const DISTANCE_GRID_POINTS = 4000;
 
@@ -134,6 +135,14 @@ export function lapTimeDeltaAtPct(
 /**
  * Time delta vs reference along lap distance. For a sector range, filters to that
  * sector and zeroes delta at sector entry so the chart shows gain/loss within the sector.
+ *
+ * Both traces are cut at the start/finish crossing first. A recording keeps the
+ * poll that lands past the line, where the sim has already restarted the clock,
+ * and subtracting one lap's opening milliseconds from another's finishing
+ * minutes puts a whole lap time into the last points of the series - a spike
+ * that takes the chart's Y scale with it and flattens the delta everyone came
+ * to read. A trace that spans several lap timers is left as it is: there is no
+ * one crossing to cut at, and the segment strip already reports it unmeasurable.
  */
 export function buildTimeDeltaSeries(
   lapSamples: DistanceSample[],
@@ -142,9 +151,12 @@ export function buildTimeDeltaSeries(
 ): DistanceSample[] {
   if (lapSamples.length === 0 || reference.length === 0) return [];
 
-  const fullDelta = lapSamples.map((s) => ({
+  const lap = samplesBeforeLapTimerReset(lapSamples) ?? lapSamples;
+  const timed = samplesBeforeLapTimerReset(reference) ?? reference;
+
+  const fullDelta = lap.map((s) => ({
     ...s,
-    lap_time_s: lapTimeDeltaAtPct(s, reference),
+    lap_time_s: lapTimeDeltaAtPct(s, timed),
   }));
 
   if (!range) return fullDelta;
